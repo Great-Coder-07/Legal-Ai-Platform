@@ -74,7 +74,7 @@ def _extract_with_pymupdf(file_bytes: bytes) -> str:
 def _extract_pages_with_pymupdf(file_bytes: bytes) -> list[str]:
     pages_text = []
     if fitz is None:
-        return ""
+        return pages_text
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page in doc:

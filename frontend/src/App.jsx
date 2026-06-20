@@ -2,14 +2,20 @@ import { useState } from 'react';
 import './index.css';
 import UploadForm from './components/UploadForm.next.jsx';
 import Dashboard from './components/Dashboard.compact.jsx';
-import GlobalSearch from './components/GlobalSearch.jsx'; // Import your new search engine view
-import { Search, FileText } from 'lucide-react'; // Imports modern vector icons for your tabs
+import GlobalSearch from './components/GlobalSearch.jsx'; 
+import ProfileSection from './components/ProfileSection.jsx'; // 🟢 Imported your new profile module view
+import { Search, FileText, LogOut, User as UserIcon } from 'lucide-react'; 
 
-function App() {
+// 🔒 Multi-Tenant Auth Imports
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { AuthScreen } from './components/AuthScreen';
+
+function AppContent() {
+  const { user, logout } = useAuth(); 
   const [reportData, setReportData] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [currentView, setCurrentView] = useState('review'); // Views: 'review' or 'search'
+  const [currentView, setCurrentView] = useState('review'); // 🟢 Views: 'review', 'search', or 'profile'
 
   const isLandingState = !reportData && !isLoading;
 
@@ -53,7 +59,7 @@ function App() {
     <div className={`app-container${isLandingState ? ' landing-mode' : ''}`}>
       {/* GLOBAL APPMENU HEADER BAR */}
       <header className="app-main-header">
-        <div className="brand-lockup">
+        <div className="brand-lockup" onClick={() => setCurrentView('review')} style={{ cursor: 'pointer' }}>
           <h1>Legal AI Platform</h1>
           <p>Clearer legal documents. Better-informed decisions.</p>
         </div>
@@ -77,12 +83,37 @@ function App() {
             <Search size={16} />
             <span>Library Intelligence</span>
           </button>
+
+          {/* 🔒 TENANT INTERACTIVE PROFILE NAVIGATION MODULE */}
+          <div className="tenant-profile-menu" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft: '1rem', borderLeft: '1px solid var(--border-color, #ccc)', paddingLeft: '1rem' }}>
+            <button 
+              type="button"
+              className={`tab-btn ${currentView === 'profile' ? 'active' : ''}`}
+              onClick={() => setCurrentView('profile')}
+              style={{ background: 'none', border: 'none', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}
+            >
+              <UserIcon size={14} />
+              <strong>{user?.username}</strong>
+            </button>
+            
+            <button 
+              type="button" 
+              className="tab-btn logout-btn" 
+              onClick={logout}
+              style={{ color: 'var(--risk-high, #dc3545)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+              title="Sign Out"
+            >
+              <LogOut size={14} />
+            </button>
+          </div>
         </nav>
       </header>
 
       <main>
-        {/* Render View Layer: Global Vector Knowledge Base */}
-        {currentView === 'search' ? (
+        {/* 🟢 VIEW ROUTER BLOCK GENERATOR PANEL */}
+        {currentView === 'profile' ? (
+          <ProfileSection />
+        ) : currentView === 'search' ? (
           <div className="animate-slide-up">
             <GlobalSearch />
           </div>
@@ -135,7 +166,7 @@ function App() {
                     </p>
                   </div>
                 ) : (
-                  <Dashboard data={reportData} />
+                  <Dashboard data={reportData} onLogout={logout} />
                 )}
               </div>
             )}
@@ -146,4 +177,22 @@ function App() {
   );
 }
 
-export default App;
+// 🔒 Main Gatekeeper Guard Layout
+function AppGuard() {
+  const { user } = useAuth();
+
+  if (!user) {
+    return <AuthScreen />;
+  }
+
+  return <AppContent />;
+}
+
+// 🟢 Master Application Root Export
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppGuard />
+    </AuthProvider>
+  );
+}

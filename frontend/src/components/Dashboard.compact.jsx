@@ -8,6 +8,7 @@ import {
   Loader2,
   Sparkles,
   Wand2,
+  LogOut
 } from 'lucide-react';
 import { api } from '../api';
 
@@ -249,7 +250,7 @@ const ClauseCard = ({ clause, number, documentHash, sourceFilename }) => {
   );
 };
 
-const Dashboard = ({ data }) => {
+const Dashboard = ({ data, onLogout }) => {
   const [riskFilter, setRiskFilter] = useState('ALL');
   const analysis = extractAnalysis(data);
   const metadata =
@@ -260,7 +261,7 @@ const Dashboard = ({ data }) => {
   const clauses = analysis.analyzed_clauses || [];
   const isSummary = data?.task === 'summarize_case' || data?.type === 'summary';
 
-  if (isSummary) {
+if (isSummary) {
     return (
       <div className="report-shell">
         <div className="report-header">
@@ -269,10 +270,18 @@ const Dashboard = ({ data }) => {
             <h2>{data?.filename || 'Uploaded document'}</h2>
             <p>A concise AI-generated overview of the document.</p>
           </div>
-          <button className="secondary-button" onClick={() => downloadAsPDF(data?.filename)}>
-            <Download size={17} /> Save as PDF
-          </button>
+          
+          {/* 🟢 BUTTON GROUP CONTAINER */}
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button type="button" className="secondary-button" onClick={() => downloadAsPDF(data?.filename)}>
+              <Download size={17} /> Save as PDF
+            </button>
+            <button type="button" className="secondary-button" onClick={onLogout} style={{ color: 'var(--risk-high, #dc3545)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <LogOut size={17} /> Sign Out
+            </button>
+          </div>
         </div>
+        
         <article className="summary-document">
           <FileText size={22} />
           <div>{extractSummary(data) || 'No summary was generated.'}</div>
@@ -308,9 +317,16 @@ const Dashboard = ({ data }) => {
             <h2>{data?.filename || 'Uploaded document'}</h2>
             <p>{clauses.length} clauses reviewed. Focus on the items that may need a closer look.</p>
           </div>
-          <button className="secondary-button" onClick={() => downloadAsPDF(data?.filename)}>
-            <Download size={17} /> Save as PDF
-          </button>
+          
+          {/* 🟢 BUTTON GROUP CONTAINER */}
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button type="button" className="secondary-button" onClick={() => downloadAsPDF(data?.filename)}>
+              <Download size={17} /> Save as PDF
+            </button>
+            <button type="button" className="secondary-button" onClick={onLogout} style={{ color: 'var(--risk-high, #dc3545)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <LogOut size={17} /> Sign Out
+            </button>
+          </div>
         </div>
 
         <section className="overview-card">
