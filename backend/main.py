@@ -10,9 +10,18 @@ import threading
 
 app = FastAPI(title="Legal AI Platform API", version="1.0.0")
 
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,7 +37,8 @@ def health_check():
 
 app.include_router(upload.router, prefix="/api", tags=["Documents"])
 
-# Load model in background so server starts instantly
+# Optional model preload. Disabled by default so imports, tests, and small
+# deployments do not unexpectedly allocate model memory or trigger downloads.
 def preload_model():
     try:
         print("[startup] Loading ML model in background...")
@@ -38,4 +48,5 @@ def preload_model():
     except Exception as e:
         print(f"[startup] Model preload failed: {e}")
 
-threading.Thread(target=preload_model, daemon=True).start()
+if os.getenv("ENABLE_MODEL_PRELOAD", "false").lower() == "true":
+    threading.Thread(target=preload_model, daemon=True).start()

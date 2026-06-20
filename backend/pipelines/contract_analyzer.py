@@ -104,7 +104,7 @@ def get_model():
     return model
 
 
-def _classify_clause_by_rules(clause: str):
+def classify_clause_by_rules(clause: str):
     text = clause.lower()
     best_label = None
     best_hits = 0
@@ -207,7 +207,7 @@ def segment_clauses(text: str) -> list:
 
 
 def classify_clause(clause: str):
-    rule_label, rule_confidence = _classify_clause_by_rules(clause)
+    rule_label, rule_confidence = classify_clause_by_rules(clause)
     mdl = get_model()
 
     if mdl is None:
@@ -268,6 +268,7 @@ def run_contract_analysis(text: str) -> dict:
                 "matched_rules": risk.get("matched_rules", []),
                 "positive_signals": risk.get("positive_signals", []),
                 "recommendations": risk.get("recommendations", []),
+                "review_notice": risk.get("review_notice", ""),
             })
         except Exception as e:
             print(f"[contract_analyzer] Error processing clause: {e}")

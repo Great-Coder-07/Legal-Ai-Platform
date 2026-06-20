@@ -40,26 +40,27 @@ except ImportError:
 
 # ─── PDF extraction ────────────────────────────────────────────────────────
 
-def extract_text_from_pdf(file_bytes: bytes) -> str:
+def extract_text_from_pdf(file_bytes: bytes) -> tuple[str, list[str]]:
     """
     Multi-strategy PDF text extraction with structure preservation.
-
-    Strategy order:
-      1. PyMuPDF with layout-aware 'blocks' extraction (fast, preserves structure)
-      2. pdfplumber (more accurate for complex layouts / tables)
-      3. pytesseract OCR (for scanned / image-only PDFs)
+    Returns a tuple of (master_text_string, list_of_individual_page_strings).
     """
-    text = _extract_with_pymupdf(file_bytes)
+    # Strategy 1: Fast PyMuPDF Page-by-Page Reading
+    pages_text = _extract_pages_with_pymupdf(file_bytes)
+    text = "\n\n".join(pages_text)
 
-    # If PyMuPDF yields too little text, the PDF is likely scanned or badly encoded
+    # Strategy 2: If text is too thin, fallback to detailed layout extraction
     if len(text.strip()) < 100:
         text = _extract_with_pdfplumber(file_bytes)
+        # Split string by our double-newlines marker to reconstruct an estimated page array
+        pages_text = [p.strip() for p in text.split("\n\n") if p.strip()]
 
-    # Final fallback: OCR page-by-page
+    # Strategy 3: Final fallback - OCR page-by-page via Tesseract Computer Vision
     if len(text.strip()) < 100:
         text = _extract_with_ocr(file_bytes)
+        pages_text = [p.strip() for p in text.split("\n\n") if p.strip()]
 
-    return text
+    return text, pages_text
 
 
 def _extract_with_pymupdf(file_bytes: bytes) -> str:
@@ -67,6 +68,10 @@ def _extract_with_pymupdf(file_bytes: bytes) -> str:
     Extract text using PyMuPDF in natural reading order.
     Much better for legal documents than block-based extraction.
     """
+    return "\n\n".join(_extract_pages_with_pymupdf(file_bytes))
+
+
+def _extract_pages_with_pymupdf(file_bytes: bytes) -> list[str]:
     pages_text = []
     if fitz is None:
         return ""
@@ -79,7 +84,7 @@ def _extract_with_pymupdf(file_bytes: bytes) -> str:
     except Exception as e:
         print(f"[parsers] PyMuPDF failed: {e}")
 
-    return "\n\n".join(pages_text)
+    return pages_text
 
 
 def _extract_with_pdfplumber(file_bytes: bytes) -> str:
@@ -167,20 +172,33 @@ def clean_text(text: str) -> str:
 
 # ─── Main entry point ──────────────────────────────────────────────────────
 
-def parse_document(filename: str, file_bytes: bytes) -> str:
+def parse_document_with_pages(filename: str, file_bytes: bytes) -> tuple[str, list[str]]:
     """
     Route the uploaded file to the correct extractor, then clean the result.
-    Returns a structured string with paragraph breaks intact.
-    Raises ValueError for unsupported formats.
+    Returns a structured string with paragraph breaks intact alongside an array of pages.
     """
     ext = filename.rsplit(".", 1)[-1].lower()
+    cleaned_pages = []
+    raw_text = ""
 
     if ext == "pdf":
-        raw_text = extract_text_from_pdf(file_bytes)
+        # Capture both the compiled text string and the layout engine's page array list
+        raw_text, raw_pages = extract_text_from_pdf(file_bytes)
+        
+        for page in raw_pages:
+          cleaned_page = clean_text(page)
+          if cleaned_page:
+              cleaned_pages.append(cleaned_page)
+              
     elif ext in ("doc", "docx"):
         raw_text = extract_text_from_docx(file_bytes)
+        # Treat docx paragraphs as pseudo-page layout frames to ensure chunking works smoothly
+        cleaned_pages = [clean_text(p) for p in raw_text.split("\n\n") if clean_text(p)]
+        
     elif ext == "txt":
         raw_text = file_bytes.decode("utf-8", errors="replace")
+        cleaned_pages = [clean_text(p) for p in raw_text.split("\n\n") if clean_text(p)]
+        
     else:
         raise ValueError(f"Unsupported file format: .{ext}")
 
@@ -192,4 +210,9 @@ def parse_document(filename: str, file_bytes: bytes) -> str:
             "It may be a scanned image PDF without OCR support."
         )
 
-    return cleaned
+    return cleaned, cleaned_pages
+
+
+def parse_document(filename: str, file_bytes: bytes) -> str:
+    text, _pages = parse_document_with_pages(filename, file_bytes)
+    return text

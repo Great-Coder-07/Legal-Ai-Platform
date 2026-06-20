@@ -1,820 +1,453 @@
 import { useId, useState } from 'react';
-import axios from 'axios';
 import {
-  AlertTriangle,
-  CheckCircle2,
-  ChevronDown,
-  FileSearch,
-  FileText,
-  Grid2X2,
-  Loader2,
-  ShieldAlert,
-  ShieldCheck,
-  Sparkles,
-  Target,
-  Download,
   BookOpen,
+  Check,
+  ChevronDown,
+  Download,
+  FileText,
+  Loader2,
+  Sparkles,
   Wand2,
 } from 'lucide-react';
+import { api } from '../api';
 
-/* ─── PDF DOWNLOAD via window.print() ───────────────────────────────────── */
-function downloadAsPDF(filename) {
-  const styleId = 'legal-ai-print-styles';
-  if (!document.getElementById(styleId)) {
-    const style = document.createElement('style');
-    style.id = styleId;
-    style.innerHTML = `
-      @media print {
-        body { background: #fff !important; color: #000 !important; }
-        header, .btn-primary, [data-html2canvas-ignore],
-        .filter-row, .clause-actions, .precedents-section, .redraft-section { display: none !important; }
-        .dashboard { background: #fff !important; padding: 0 !important; }
-        .glass-panel { border: 1px solid #ccc !important; background: #fff !important;
-                        box-shadow: none !important; break-inside: avoid; margin-bottom: 1rem; padding: 1rem !important; }
-        .risk-badge.high   { background: #ffe5e0 !important; color: #c0392b !important; }
-        .risk-badge.medium { background: #fff3e0 !important; color: #b7770d !important; }
-        .risk-badge.low    { background: #e8f8ee !important; color: #1e7e34 !important; }
-        .clause-item { break-inside: avoid; border-left: 3px solid #ccc !important; }
-        .clause-item.risk-high   { border-left-color: #c0392b !important; }
-        .clause-item.risk-medium { border-left-color: #b7770d !important; }
-        .clause-item.risk-low    { border-left-color: #1e7e34 !important; }
-        .donut-analytics, .donut-chart, .donut-shell { display: none !important; }
-        .explanation-box { background: #f5f5f5 !important; color: #111 !important; }
-        @page { margin: 1.5cm; size: A4; }
-      }
-    `;
-    document.head.appendChild(style);
-  }
-  const prevTitle = document.title;
-  document.title = filename ? `${filename}_Report` : 'Legal_AI_Report';
-  window.print();
-  document.title = prevTitle;
-}
+const RISK_COPY = {
+  HIGH: { label: 'Needs attention', short: 'High' },
+  MEDIUM: { label: 'Review advised', short: 'Medium' },
+  LOW: { label: 'Looks standard', short: 'Low' },
+};
 
-/* ─── HELPERS ────────────────────────────────────────────────────────────── */
-const RiskBadge = ({ level }) => (
-  <span className={`risk-badge ${(level || 'low').toLowerCase()}`}>{level} RISK</span>
+const RiskBadge = ({ level = 'LOW' }) => (
+  <span className={`risk-badge ${level.toLowerCase()}`}>
+    <span className="risk-dot" />
+    {RISK_COPY[level]?.label || level}
+  </span>
 );
 
-const RISK_LEVEL_ORDER = ['HIGH', 'MEDIUM', 'LOW'];
+const downloadAsPDF = (filename) => {
+  const previousTitle = document.title;
+  document.title = `${filename || 'Legal document'} review`;
+  window.print();
+  document.title = previousTitle;
+};
+
+const extractAnalysis = (data) =>
+  data?.results?.contract_analysis ||
+  data?.content?.contract_analysis ||
+  data?.contract_analysis ||
+  {};
+
+const extractSummary = (data) =>
+  data?.results?.summary_data?.final_summary ||
+  data?.content?.summary_data?.final_summary ||
+  data?.summary_data?.final_summary ||
+  '';
 
 const formatClauseType = (value) =>
   (value || 'Unclassified clause').replace(/\bclause\b/gi, '').replace(/\s+/g, ' ').trim();
 
-const getHeatClass = (count) => {
-  if (count >= 3) return 'hot';
-  if (count === 2) return 'warm';
-  if (count === 1) return 'mild';
-  return 'none';
-};
+const ClauseAction = ({ icon, children, onClick, loading, active, variant = 'secondary' }) => (
+  <button type="button" className={`text-button ${variant} ${active ? 'active' : ''}`} onClick={onClick} disabled={loading}>
+    {loading ? <Loader2 size={15} className="spin-icon" /> : icon}
+    {children}
+  </button>
+);
 
-const uniqueByKey = (items = [], getKey = (item) => item) =>
-  items.filter((item, index, array) => index === array.findIndex((candidate) => getKey(candidate) === getKey(item)));
+const ClauseCard = ({ clause, number, documentHash, sourceFilename }) => {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [explanation, setExplanation] = useState('');
+  const [explanationOpen, setExplanationOpen] = useState(false);
+  const [explanationLoading, setExplanationLoading] = useState(false);
+  const [redraft, setRedraft] = useState('');
+  const [redraftOpen, setRedraftOpen] = useState(false);
+  const [redraftLoading, setRedraftLoading] = useState(false);
+  const [similarResult, setSimilarResult] = useState(null);
+  const [similarOpen, setSimilarOpen] = useState(false);
+  const [similarLoading, setSimilarLoading] = useState(false);
+  const detailsId = useId();
 
-const getRiskBandCopy = (score) => {
-  if (score >= 3) return { level: 'HIGH', range: '3 or more points' };
-  if (score >= 1) return { level: 'MEDIUM', range: '1 to 2 points' };
-  return { level: 'LOW', range: '0 points' };
-};
+  const recommendations = (clause.recommendations || []).filter(Boolean);
+  const matchedRules = clause.matched_rules || [];
+  const positiveSignals = clause.positive_signals || [];
+  const level = clause.risk_level || 'LOW';
 
-const normalizeForMatch = (value = '') => value.replace(/\s+/g, ' ').trim();
-
-const splitEvidenceIntoSegments = (evidence = '') => {
-  const normalizedEvidence = normalizeForMatch(evidence);
-
-  if (!normalizedEvidence || /not found/i.test(normalizedEvidence)) {
-    return [];
-  }
-
-  return normalizedEvidence
-    .split(/\s*\/\s*/)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length >= 3);
-};
-
-const findAllTextMatches = (sourceText = '', searchText = '') => {
-  if (!sourceText || !searchText) return [];
-
-  const haystack = sourceText.toLowerCase();
-  const needle = searchText.toLowerCase();
-  const matches = [];
-  let startIndex = 0;
-
-  while (startIndex < haystack.length) {
-    const matchIndex = haystack.indexOf(needle, startIndex);
-    if (matchIndex === -1) break;
-
-    matches.push({
-      start: matchIndex,
-      end: matchIndex + needle.length,
-    });
-
-    startIndex = matchIndex + Math.max(needle.length, 1);
-  }
-
-  return matches;
-};
-
-const chooseHighlightForRange = (highlights = []) =>
-  [...highlights].sort((left, right) => {
-    const impactDelta = Math.abs(right.impact || 0) - Math.abs(left.impact || 0);
-    if (impactDelta !== 0) return impactDelta;
-
-    if (left.kind !== right.kind) {
-      return left.kind === 'risk' ? -1 : 1;
+  const explain = async () => {
+    if (explanation) {
+      setExplanationOpen(!explanationOpen);
+      return;
     }
-
-    const lengthDelta = (right.end - right.start) - (left.end - left.start);
-    if (lengthDelta !== 0) return lengthDelta;
-
-    return String(left.label || '').localeCompare(String(right.label || ''));
-  })[0];
-
-const buildClauseHighlights = (clauseText, scoreBreakdown = []) => {
-  const sourceText = clauseText || '';
-  const seen = new Set();
-  const rawHighlights = [];
-
-  scoreBreakdown
-    .filter((item) => item?.evidence && item.evidence.trim().length >= 3 && Number(item.impact || 0) !== 0)
-    .forEach((item) => {
-      const segments = splitEvidenceIntoSegments(item.evidence);
-
-      segments.forEach((segment) => {
-        findAllTextMatches(sourceText, segment).forEach(({ start, end }) => {
-          const key = `${item.kind}-${item.label}-${start}-${end}`;
-          if (seen.has(key)) return;
-          seen.add(key);
-
-          rawHighlights.push({
-            start,
-            end,
-            evidence: segment,
-            impact: Number(item.impact || 0),
-            kind: item.kind === 'protection' ? 'protection' : 'risk',
-            label: item.label,
-          });
-        });
-      });
-    });
-
-  if (!rawHighlights.length) return [];
-
-  const boundaries = [...new Set(rawHighlights.flatMap((highlight) => [highlight.start, highlight.end]))]
-    .sort((left, right) => left - right);
-
-  const resolvedHighlights = [];
-
-  for (let index = 0; index < boundaries.length - 1; index += 1) {
-    const start = boundaries[index];
-    const end = boundaries[index + 1];
-    const coveringHighlights = rawHighlights.filter((highlight) => highlight.start <= start && highlight.end >= end);
-
-    if (!coveringHighlights.length) continue;
-
-    const chosenHighlight = chooseHighlightForRange(coveringHighlights);
-    const previousHighlight = resolvedHighlights[resolvedHighlights.length - 1];
-
-    if (
-      previousHighlight &&
-      previousHighlight.end === start &&
-      previousHighlight.kind === chosenHighlight.kind &&
-      previousHighlight.label === chosenHighlight.label &&
-      previousHighlight.impact === chosenHighlight.impact
-    ) {
-      previousHighlight.end = end;
-      continue;
-    }
-
-    resolvedHighlights.push({
-      ...chosenHighlight,
-      start,
-      end,
-    });
-  }
-
-  return resolvedHighlights;
-};
-
-const renderHighlightedClauseText = (clauseText, highlights = []) => {
-  if (!highlights.length) return clauseText;
-
-  const content = [];
-  let cursor = 0;
-
-  highlights.forEach((highlight, index) => {
-    if (cursor < highlight.start) {
-      content.push(clauseText.slice(cursor, highlight.start));
-    }
-
-    content.push(
-      <mark
-        key={`${highlight.kind}-${highlight.start}-${highlight.end}-${index}`}
-        className={`clause-highlight ${highlight.kind}`}
-        title={highlight.label}
-      >
-        {clauseText.slice(highlight.start, highlight.end)}
-      </mark>
-    );
-
-    cursor = highlight.end;
-  });
-
-  if (cursor < clauseText.length) {
-    content.push(clauseText.slice(cursor));
-  }
-
-  return content;
-};
-
-const DONUT_CONFIG = {
-  HIGH:   { color: '#e1533f', softColor: 'rgba(225, 83, 63, 0.14)',  label: 'High Risk',   description: 'These clauses most likely need changes first.' },
-  MEDIUM: { color: '#f2a93b', softColor: 'rgba(242, 169, 59, 0.14)', label: 'Medium Risk', description: 'These clauses deserve a closer look before signing.' },
-  LOW:    { color: '#4ecb71', softColor: 'rgba(78, 203, 113, 0.14)', label: 'Low Risk',    description: 'These clauses look more standard or already safer.' },
-};
-
-/**
- * ROBUST DATA EXTRACTOR
- * Handles every possible shape the backend might return:
- *
- *  Shape A (correct): data.results.contract_analysis.analyzed_clauses
- *  Shape B (old bug): data.content.contract_analysis.analyzed_clauses  
- *  Shape C (direct):  data.contract_analysis.analyzed_clauses
- *  Shape D (flat):    data.analyzed_clauses
- */
-function extractAnalysisPayload(data) {
-  // Try all known paths in priority order
-  const candidates = [
-    data?.results?.contract_analysis,
-    data?.content?.contract_analysis,
-    data?.contract_analysis,
-    data?.results,
-    data,
-  ];
-
-  for (const candidate of candidates) {
-    if (candidate && Array.isArray(candidate.analyzed_clauses)) {
-      console.log('[Dashboard] Found analyzed_clauses at candidate:', candidate);
-      return candidate;
-    }
-  }
-
-  console.warn('[Dashboard] Could not find analyzed_clauses in data:', data);
-  return {};
-}
-
-function extractMetadata(data) {
-  return (
-    data?.results?.metadata ||
-    data?.content?.metadata ||
-    data?.metadata ||
-    {}
-  );
-}
-
-function extractSummary(data) {
-  return (
-    data?.results?.summary_data?.final_summary ||
-    data?.content?.summary_data?.final_summary ||
-    data?.summary_data?.final_summary ||
-    ''
-  );
-}
-
-/* ─── DONUT CHART ────────────────────────────────────────────────────────── */
-const DonutChart = ({ clauses, highRiskCount, mediumRiskCount, safeCount, riskPosture }) => {
-  const [activeSegment, setActiveSegment] = useState('HIGH');
-  const total = clauses.length || 1;
-  const chartData = [
-    { key: 'HIGH',   value: highRiskCount,   score: clauses.filter(c => c.risk_level === 'HIGH').reduce((s,c) => s+(c.risk_score||0), 0) },
-    { key: 'MEDIUM', value: mediumRiskCount,  score: clauses.filter(c => c.risk_level === 'MEDIUM').reduce((s,c) => s+(c.risk_score||0), 0) },
-    { key: 'LOW',    value: safeCount,        score: clauses.filter(c => c.risk_level === 'LOW').reduce((s,c) => s+(c.risk_score||0), 0) },
-  ];
-  const activeData = chartData.find(i => i.key === activeSegment && i.value > 0) || chartData.find(i => i.value > 0) || chartData[0];
-  const radius = 70;
-  const circumference = 2 * Math.PI * radius;
-  let cumulativeOffset = 0;
-
-  return (
-    <div className="donut-analytics">
-      <div className="donut-shell">
-        <svg viewBox="0 0 200 200" className="donut-chart">
-          <circle className="donut-track" cx="100" cy="100" r={radius} />
-          {chartData.map(item => {
-            const dash = circumference * (item.value / total);
-            const strokeDashoffset = -cumulativeOffset;
-            cumulativeOffset += dash;
-            const config = DONUT_CONFIG[item.key];
-            return (
-              <circle key={item.key} cx="100" cy="100" r={radius} fill="transparent"
-                stroke={config.color} strokeWidth={20}
-                strokeDasharray={`${dash} ${circumference - dash}`}
-                strokeDashoffset={strokeDashoffset}
-                strokeLinecap={dash > 0 ? 'round' : 'butt'}
-                transform="rotate(-90 100 100)"
-                className={`donut-segment ${activeData.key === item.key ? 'active' : ''}`}
-                onMouseEnter={() => setActiveSegment(item.key)} />
-            );
-          })}
-        </svg>
-        <div className="donut-center">
-          <span>Overall risk</span>
-          <strong>{riskPosture}%</strong>
-          <small>{clauses.length} clauses analyzed</small>
-        </div>
-      </div>
-
-      <div className="donut-sidepanel">
-        <div className="donut-tooltip-card" style={{
-          background: `linear-gradient(180deg, ${DONUT_CONFIG[activeData.key].softColor}, rgba(255,255,255,0.03))`,
-          borderColor: DONUT_CONFIG[activeData.key].softColor,
-        }}>
-          <div className="donut-tooltip-top">
-            <span className="legend-dot" style={{ '--dot-color': DONUT_CONFIG[activeData.key].color }} />
-            <strong>{DONUT_CONFIG[activeData.key].label}</strong>
-          </div>
-          <div className="donut-tooltip-metrics">
-            <div><span>Clauses</span><strong>{activeData.value}</strong></div>
-            <div><span>Part of document</span><strong>{Math.round((activeData.value/total)*100)}%</strong></div>
-            <div><span>Risk points</span><strong>{activeData.score}</strong></div>
-          </div>
-          <p>{DONUT_CONFIG[activeData.key].description}</p>
-        </div>
-        <div className="donut-legend">
-          {chartData.map(item => {
-            const config = DONUT_CONFIG[item.key];
-            return (
-              <button key={item.key} type="button"
-                className={`donut-legend-item ${activeData.key === item.key ? 'active' : ''}`}
-                onMouseEnter={() => setActiveSegment(item.key)}
-                onFocus={() => setActiveSegment(item.key)}>
-                <span className="legend-dot" style={{ '--dot-color': config.color }} />
-                <div className="donut-legend-copy">
-                  <strong>{config.label}</strong>
-                  <span>{item.value} clauses</span>
-                </div>
-                <span className="donut-legend-value">{Math.round((item.value/total)*100)}%</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-/* ─── PRECEDENTS PANEL ───────────────────────────────────────────────────── */
-const PrecedentsPanel = ({ clauseText }) => {
-  const [precedents, setPrecedents] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [open, setOpen] = useState(false);
-
-  const handleSearch = async () => {
-    if (open && precedents) { setOpen(false); return; }
-    setOpen(true);
-    if (precedents) return;
-    setLoading(true);
+    setExplanationLoading(true);
+    setExplanationOpen(true);
     try {
-      const res = await axios.post('http://localhost:8000/api/find-precedents', { clause_text: clauseText });
-      setPrecedents(res.data.precedents || []);
-    } catch { setPrecedents([]); }
-    finally { setLoading(false); }
+      const response = await api.post('/api/explain-clause', {
+        clause_text: clause.clause_text,
+        clause_type: clause.type,
+        risk_level: level,
+        risk_reason: clause.risk_reason,
+      });
+      setExplanation(response.data.explanation || 'No explanation was generated.');
+    } catch {
+      setExplanation('The explanation service is unavailable right now.');
+    } finally {
+      setExplanationLoading(false);
+    }
+  };
+
+  const createRedraft = async () => {
+    if (redraft) {
+      setRedraftOpen(!redraftOpen);
+      return;
+    }
+    setRedraftLoading(true);
+    setRedraftOpen(true);
+    try {
+      const response = await api.post('/api/redraft-clause', {
+        clause_text: clause.clause_text,
+        clause_type: clause.type,
+        risk_level: level,
+        risk_reason: clause.risk_reason,
+        recommendations,
+      });
+      setRedraft(response.data.redraft || 'No redraft was generated.');
+    } catch {
+      setRedraft('The redraft service is unavailable right now.');
+    } finally {
+      setRedraftLoading(false);
+    }
+  };
+
+  const findSimilar = async () => {
+    if (similarResult) {
+      setSimilarOpen(!similarOpen);
+      return;
+    }
+    setSimilarLoading(true);
+    setSimilarOpen(true);
+    try {
+      const response = await api.post('/api/similar-clauses', {
+        clause_text: clause.clause_text,
+        clause_type: clause.type,
+        exclude_document_hash: documentHash || '',
+        exclude_source: sourceFilename || '',
+        top_k: 3,
+      });
+      setSimilarResult(response.data);
+    } catch {
+      setSimilarResult({
+        status: 'error',
+        matches: [],
+        message: 'The private clause library is unavailable right now.',
+      });
+    } finally {
+      setSimilarLoading(false);
+    }
   };
 
   return (
-    <div className="precedents-section">
-      <button type="button" onClick={handleSearch} className="explain-btn secondary" data-html2canvas-ignore="true">
-        {loading ? <Loader2 size={14} className="spin-icon" /> : <BookOpen size={14} />}
-        {open ? 'Hide precedents' : 'Find similar clauses'}
+    <article className={`clause-card risk-${level.toLowerCase()}`}>
+      <div className="clause-topline">
+        <div>
+          <span className="clause-number">Clause {number}</span>
+          <h3>{formatClauseType(clause.type)}</h3>
+        </div>
+        <RiskBadge level={level} />
+      </div>
+
+      <p className="clause-summary">{clause.risk_summary || clause.risk_reason}</p>
+      {recommendations[0] && (
+        <div className="next-step">
+          <Check size={16} />
+          <span>{recommendations[0]}</span>
+        </div>
+      )}
+
+      <button
+        type="button"
+        className="details-toggle"
+        onClick={() => setDetailsOpen(!detailsOpen)}
+        aria-expanded={detailsOpen}
+        aria-controls={detailsId}
+      >
+        {detailsOpen ? 'Hide clause' : 'View clause and details'}
+        <ChevronDown size={16} className={detailsOpen ? 'rotate' : ''} />
       </button>
-      {open && (
-        <div className="precedents-panel">
-          <div className="detail-title" style={{ marginBottom: '0.5rem' }}>
-            <BookOpen size={16} /> Similar clauses in past documents
+
+      {detailsOpen && (
+        <div className="clause-details" id={detailsId}>
+          <div className="clause-text">
+            <span>Original clause</span>
+            <p>{clause.clause_text}</p>
           </div>
-          {loading && <p className="detail-empty">Searching vector database...</p>}
-          {!loading && precedents?.length === 0 && (
-            <p className="detail-empty">No similar clauses found yet. Upload more documents to build the knowledge base.</p>
+
+          {(matchedRules.length > 0 || positiveSignals.length > 0) && (
+            <div className="signals-grid">
+              {matchedRules.length > 0 && (
+                <div>
+                  <span className="detail-label">Why it was flagged</span>
+                  <ul>{matchedRules.map((rule) => <li key={rule.rule_id || rule.label}>{rule.label}</li>)}</ul>
+                </div>
+              )}
+              {positiveSignals.length > 0 && (
+                <div>
+                  <span className="detail-label">Protective language</span>
+                  <ul>{positiveSignals.map((signal) => <li key={signal.label}>{signal.label}</li>)}</ul>
+                </div>
+              )}
+            </div>
           )}
-          {!loading && precedents?.length > 0 && (
-            <div className="chip-list">
-              {precedents.map((p, i) => (
-                <div key={i} className="detail-chip precedent-chip compact">
-                  <strong>{p.metadata?.source || 'Past document'}</strong>
-                  <em>{(p.text || '').slice(0, 120)}...</em>
+
+          <div className="clause-actions">
+            <ClauseAction icon={<Sparkles size={15} />} onClick={explain} loading={explanationLoading} active={explanationOpen}>
+              {explanationOpen ? 'Hide explanation' : 'Explain simply'}
+            </ClauseAction>
+            {level !== 'LOW' && (
+              <ClauseAction icon={<Wand2 size={15} />} onClick={createRedraft} loading={redraftLoading} active={redraftOpen}>
+                {redraftOpen ? 'Hide redraft' : 'Suggest redraft'}
+              </ClauseAction>
+            )}
+            <ClauseAction icon={<BookOpen size={15} />} onClick={findSimilar} loading={similarLoading} active={similarOpen}>
+              {similarOpen ? 'Hide similar clauses' : 'Search private library'}
+            </ClauseAction>
+          </div>
+
+          {explanationOpen && <div className="action-result">{explanationLoading ? 'Creating explanation…' : explanation}</div>}
+          {redraftOpen && <div className="action-result redraft-result">{redraftLoading ? 'Creating redraft…' : redraft}</div>}
+          {similarOpen && (
+            <div className="action-result">
+              {similarLoading && 'Searching your private clause library…'}
+              {!similarLoading && similarResult?.matches?.length === 0 && (
+                <div className="library-empty">
+                  <strong>No sufficiently similar clauses found.</strong>
+                  <span>{similarResult?.message || 'Add more contracts to your private library to improve coverage.'}</span>
+                </div>
+              )}
+              {!similarLoading && similarResult?.matches?.length > 0 && (
+                <div className="library-disclaimer">{similarResult.message}</div>
+              )}
+              {!similarLoading && similarResult?.matches?.map((item) => (
+                <div className="precedent-item" key={item.id}>
+                  <div className="precedent-heading">
+                    <strong>{item.metadata?.source || 'Past document'}</strong>
+                    <span>{item.similarity_percent}% similar</span>
+                  </div>
+                  <small>
+                    {formatClauseType(item.metadata?.clause_type)}
+                    {item.metadata?.jurisdiction && item.metadata.jurisdiction !== 'unspecified'
+                      ? ` · ${item.metadata.jurisdiction}`
+                      : ''}
+                    {item.metadata?.page_number > 0 ? ` · Page ${item.metadata.page_number}` : ''}
+                    {item.metadata?.clause_index ? ` · Clause ${item.metadata.clause_index}` : ''}
+                  </small>
+                  <span>{item.text}</span>
                 </div>
               ))}
             </div>
           )}
         </div>
       )}
-    </div>
-  );
-};
-
-/* ─── REDRAFT PANEL ──────────────────────────────────────────────────────── */
-const RedraftPanel = ({ clause }) => {
-  const [redraft, setRedraft] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [open, setOpen] = useState(false);
-
-  if (clause.risk_level === 'LOW') return null;
-
-  const handleRedraft = async () => {
-    if (open && redraft) { setOpen(false); return; }
-    setOpen(true);
-    if (redraft) return;
-    setLoading(true);
-    try {
-      const res = await axios.post('http://localhost:8000/api/redraft-clause', {
-        clause_text: clause.clause_text,
-        clause_type: clause.type,
-        risk_level: clause.risk_level,
-        risk_reason: clause.risk_reason,
-        recommendations: clause.recommendations || [],
-      });
-      setRedraft(res.data.redraft || 'No redraft generated.');
-    } catch { setRedraft('Redraft service unavailable. Ensure the backend is running.'); }
-    finally { setLoading(false); }
-  };
-
-  return (
-    <div className="redraft-section">
-      <button type="button" onClick={handleRedraft} className="explain-btn redraft-btn" data-html2canvas-ignore="true">
-        {loading ? <Loader2 size={14} className="spin-icon" /> : <Wand2 size={14} />}
-        {open ? 'Hide redraft' : 'Suggest safer redraft'}
-      </button>
-      {open && (
-        <div className="redraft-panel">
-          <div className="detail-title" style={{ marginBottom: '0.5rem', color: 'var(--accent-color)' }}>
-            <Wand2 size={16} /> AI-suggested safer version
-          </div>
-          {loading && <p className="detail-empty">Generating safer clause language...</p>}
-          {!loading && redraft && <div className="redraft-text">{redraft}</div>}
-        </div>
-      )}
-    </div>
-  );
-};
-
-/* ─── CLAUSE CARD ────────────────────────────────────────────────────────── */
-const ClauseCard = ({ clause, idx }) => {
-  const [explanation, setExplanation] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [explanationOpen, setExplanationOpen] = useState(false);
-  const detailsPanelId = useId();
-
-  const matchedRules = uniqueByKey(clause.matched_rules || [], (rule) => `${rule.rule_id || rule.label}-${rule.evidence || ''}`);
-  const positiveSignals = uniqueByKey(clause.positive_signals || [], (signal) => `${signal.label}-${signal.evidence || ''}`);
-  const recommendations = uniqueByKey((clause.recommendations || []).filter(Boolean));
-  const scoreBreakdown = [
-    ...matchedRules.map((rule) => ({
-      kind: 'risk',
-      label: rule.label,
-      evidence: rule.evidence,
-      impact: Number(rule.impact || 0),
-    })),
-    ...positiveSignals
-      .filter((signal) => Number(signal.impact || 0) !== 0)
-      .map((signal) => ({
-        kind: 'protection',
-        label: signal.label,
-        evidence: signal.evidence,
-        impact: Number(signal.impact || 0),
-      })),
-  ].sort((left, right) => Math.abs(right.impact) - Math.abs(left.impact));
-  const riskScore = Number(clause.risk_score || 0);
-  const riskBand = getRiskBandCopy(riskScore);
-  const clauseHighlights = buildClauseHighlights(clause.clause_text, scoreBreakdown);
-  const topRule             = matchedRules[0]?.label    || 'No major trigger';
-  const topPositive         = positiveSignals[0]?.label || 'No clear protection';
-  const topRecommendation   = recommendations[0]        || 'No immediate redraft priority';
-  const hasExtraDetails = matchedRules.length > 0 || positiveSignals.length > 0 || recommendations.length > 0;
-
-  const handleExplain = async () => {
-    if (explanation) { setExplanationOpen(!explanationOpen); return; }
-    setLoading(true);
-    setExplanationOpen(true);
-    try {
-      const res = await axios.post('http://localhost:8000/api/explain-clause', {
-        clause_text: clause.clause_text,
-        clause_type: clause.type,
-        risk_level:  clause.risk_level,
-        risk_reason: clause.risk_reason,
-      });
-      setExplanation(res.data.explanation);
-    } catch { setExplanation('Failed to generate explanation. Please try again.'); }
-    finally { setLoading(false); }
-  };
-
-  const riskLevel = clause.risk_level || 'LOW';
-
-  return (
-    <article className={`clause-item risk-${riskLevel.toLowerCase()}`}>
-      <div className="clause-header compact">
-        <div>
-          <div className="clause-eyebrow">Clause {idx + 1}</div>
-          <span className="clause-type">{clause.type}</span>
-        </div>
-        <div className="clause-header-meta">
-          <span className="confidence-pill">Confidence {((clause.confidence || 0) * 100).toFixed(0)}%</span>
-          <RiskBadge level={riskLevel} />
-        </div>
-      </div>
-
-      <div className="clause-summary-row compact">
-        <p className="clause-summary">{clause.risk_summary || clause.risk_reason}</p>
-      </div>
-
-      <div className="clause-preview">
-        <div className="preview-label-row">
-          <span className="preview-label">Preview</span>
-          {clauseHighlights.length > 0 && <span className="preview-hint">Underlined text marks detected evidence</span>}
-        </div>
-        <p>{renderHighlightedClauseText(clause.clause_text, clauseHighlights)}</p>
-      </div>
-
-      <div className="clause-mini-grid">
-        <div className="mini-stat"><span className="mini-label">Risk score</span><strong>{riskScore} points</strong></div>
-        <div className="mini-stat"><span className="mini-label">Trigger</span><strong>{topRule}</strong></div>
-        <div className="mini-stat"><span className="mini-label">Protection</span><strong>{topPositive}</strong></div>
-        <div className="mini-stat"><span className="mini-label">Next step</span><strong>{topRecommendation}</strong></div>
-      </div>
-
-      <div className="clause-actions">
-        {hasExtraDetails && (
-          <button
-            type="button"
-            onClick={() => setDetailsOpen(!detailsOpen)}
-            className="explain-btn secondary"
-            data-html2canvas-ignore="true"
-            aria-expanded={detailsOpen}
-            aria-controls={detailsPanelId}
-          >
-            <ChevronDown size={14} style={{ transform: detailsOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s ease' }} />
-            {detailsOpen ? 'Hide details' : 'View details'}
-          </button>
-        )}
-        <button type="button" onClick={handleExplain} disabled={loading} className="explain-btn" data-html2canvas-ignore="true">
-          {loading ? <><Loader2 size={14} className="spin-icon" /> Generating...</> : <><Sparkles size={14} />{explanation ? (explanationOpen ? 'Hide explanation' : 'Show explanation') : 'Explain clause'}</>}
-        </button>
-        <RedraftPanel clause={clause} />
-        <PrecedentsPanel clauseText={clause.clause_text} />
-      </div>
-
-      {detailsOpen && (
-        <div className="details-stack" id={detailsPanelId}>
-          <div className="detail-overview">
-            <span>{riskScore} total points</span>
-            <span>{matchedRules.length} trigger{matchedRules.length === 1 ? '' : 's'}</span>
-            <span>{positiveSignals.length} protection{positiveSignals.length === 1 ? '' : 's'}</span>
-            <span>{recommendations.length} recommendation{recommendations.length === 1 ? '' : 's'}</span>
-          </div>
-          <section className="score-panel">
-            <div className="detail-title"><ShieldAlert size={16} />Risk score explanation</div>
-            <div className="score-summary">
-              <div className="score-total-card">
-                <span>Total score</span>
-                <strong>{riskScore}</strong>
-                <small>{clause.risk_level} risk</small>
-              </div>
-              <div className="score-threshold-copy">
-                <strong>How the score works</strong>
-                <p>
-                  The engine adds points for risk triggers and subtracts points for protections that reduce exposure.
-                  A score in the <strong>{riskBand.range}</strong> band is classified as <strong>{riskBand.level}</strong> risk.
-                </p>
-              </div>
-            </div>
-            {scoreBreakdown.length > 0 ? (
-              <div className="score-breakdown-list">
-                {scoreBreakdown.map((item, breakdownIndex) => (
-                  <div
-                    key={`${item.kind}-${item.label}-${breakdownIndex}`}
-                    className={`score-breakdown-item ${item.kind === 'risk' ? 'risk' : 'protection'}`}
-                  >
-                    <div className="score-impact-pill">
-                      {item.impact > 0 ? `+${item.impact}` : item.impact}
-                    </div>
-                    <div className="score-breakdown-copy">
-                      <strong>{item.label}</strong>
-                      <span>{item.kind === 'risk' ? 'Raised the score' : 'Reduced the score'}</span>
-                      {item.evidence && <em>Evidence: {item.evidence}</em>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="detail-empty">No scored triggers or offsetting protections were recorded for this clause.</p>
-            )}
-          </section>
-          <section className="recommendation-panel">
-            <div className="detail-title"><Target size={16} />Recommended next steps</div>
-            {recommendations.length > 0 ? (
-              <ul className="recommendation-list compact">
-                {recommendations.map((rec,i) => <li key={`${rec}-${i}`}>{rec}</li>)}
-              </ul>
-            ) : <p className="detail-empty">No further recommendations beyond the main action shown above.</p>}
-          </section>
-        </div>
-      )}
-      {explanationOpen && explanation && <div className="explanation-box">{explanation}</div>}
     </article>
   );
 };
 
-/* ─── DASHBOARD ──────────────────────────────────────────────────────────── */
 const Dashboard = ({ data }) => {
   const [riskFilter, setRiskFilter] = useState('ALL');
+  const analysis = extractAnalysis(data);
+  const metadata =
+    data?.results?.metadata ||
+    data?.content?.metadata ||
+    data?.metadata ||
+    {};
+  const clauses = analysis.analyzed_clauses || [];
+  const isSummary = data?.task === 'summarize_case' || data?.type === 'summary';
 
-  // Debug log — see in browser console what shape arrives
-  console.log('[Dashboard] Received data prop:', data);
+  if (isSummary) {
+    return (
+      <div className="report-shell">
+        <div className="report-header">
+          <div>
+            <span className="eyebrow">Document summary</span>
+            <h2>{data?.filename || 'Uploaded document'}</h2>
+            <p>A concise AI-generated overview of the document.</p>
+          </div>
+          <button className="secondary-button" onClick={() => downloadAsPDF(data?.filename)}>
+            <Download size={17} /> Save as PDF
+          </button>
+        </div>
+        <article className="summary-document">
+          <FileText size={22} />
+          <div>{extractSummary(data) || 'No summary was generated.'}</div>
+        </article>
+      </div>
+    );
+  }
 
-  // ROBUST extraction — handles all possible backend response shapes
-  const analysisPayload   = extractAnalysisPayload(data);
-  const metadata          = extractMetadata(data);
-  const task              = data?.task || 'analyze_contract';
-  const isContractAnalysis = task === 'analyze_contract';
-  const isSummary          = task === 'summarize_case';
+  const counts = {
+    HIGH: clauses.filter((clause) => clause.risk_level === 'HIGH').length,
+    MEDIUM: clauses.filter((clause) => clause.risk_level === 'MEDIUM').length,
+    LOW: clauses.filter((clause) => clause.risk_level === 'LOW').length,
+  };
 
-  const clauses            = analysisPayload.analyzed_clauses || [];
-  const riskSummary        = analysisPayload.risk_summary     || {};
-  const topRecommendations = riskSummary.top_recommendations  || [];
+  const filtered = riskFilter === 'ALL'
+    ? clauses
+    : clauses.filter((clause) => clause.risk_level === riskFilter);
 
-  console.log('[Dashboard] Extracted clauses count:', clauses.length);
-
-  const highRiskCount   = clauses.filter(c => c.risk_level === 'HIGH').length;
-  const mediumRiskCount = clauses.filter(c => c.risk_level === 'MEDIUM').length;
-  const safeCount       = clauses.filter(c => c.risk_level === 'LOW').length;
-  const filteredClauses = riskFilter === 'ALL' ? clauses : clauses.filter(c => c.risk_level === riskFilter);
-
-  const averageConfidence = clauses.length
-    ? `${Math.round((clauses.reduce((s,c) => s+(c.confidence||0), 0) / clauses.length) * 100)}%`
-    : '0%';
-
-  const highestClause = clauses.reduce((cur,c) => (!cur || (c.risk_score||0) > (cur.risk_score||0)) ? c : cur, null);
-  const riskWeightedExposure = clauses.reduce((s,c) => s+(c.risk_score||0), 0);
-  const riskPosture = clauses.length ? Math.round((riskWeightedExposure / (clauses.length * 6)) * 100) : 0;
-
-  const analyticsByTypeMap = clauses.reduce((acc, clause) => {
-    const key = clause.type || 'Unclassified clause';
-    if (!acc[key]) acc[key] = { type: key, displayType: formatClauseType(key), total:0, high:0, medium:0, low:0, totalScore:0, totalConfidence:0 };
-    acc[key].total++;
-    acc[key].totalScore += clause.risk_score || 0;
-    acc[key].totalConfidence += clause.confidence || 0;
-    if (clause.risk_level === 'HIGH')   acc[key].high++;
-    if (clause.risk_level === 'MEDIUM') acc[key].medium++;
-    if (clause.risk_level === 'LOW')    acc[key].low++;
-    return acc;
-  }, {});
-
-  const heatmapRows = Object.values(analyticsByTypeMap)
-    .map(e => ({
-      ...e,
-      averageScore:      e.total ? Number((e.totalScore/e.total).toFixed(1)) : 0,
-      averageConfidence: e.total ? Math.round((e.totalConfidence/e.total)*100) : 0,
-    }))
-    .sort((a,b) => b.high - a.high || b.averageScore - a.averageScore || b.total - a.total)
-    .slice(0, 8);
+  const keyRecommendations = [...new Set(
+    clauses
+      .filter((clause) => clause.risk_level !== 'LOW')
+      .flatMap((clause) => clause.recommendations || [])
+      .filter(Boolean)
+  )].slice(0, 3);
 
   return (
-    <div className="dashboard" id="dashboard-pdf-root"
-      style={{ backgroundColor: '#0d1117', padding: '1rem', borderRadius: '8px' }}>
-
-      {/* HERO */}
-      <div className="report-hero glass-panel compact-hero" style={{ position: 'relative' }}>
-        <button onClick={() => downloadAsPDF(data?.filename)} data-html2canvas-ignore="true"
-          style={{ position:'absolute', top:'1.5rem', right:'1.5rem', zIndex:50, display:'flex', alignItems:'center', gap:'0.5rem', background:'var(--accent-color)', color:'white', border:'none', padding:'0.5rem 1rem', borderRadius:'6px', cursor:'pointer', fontWeight:600 }}>
-          <Download size={16} /> Download PDF
-        </button>
-        <div className="report-hero-copy" style={{ paddingRight: '160px' }}>
-          <div className="hero-kicker">Contract intelligence report</div>
-          <h2>Analysis Report: {data?.filename || 'Uploaded Document'}</h2>
-          <p>Compact review with confidence, negotiation priorities, and optional clause-level detail.</p>
+    <>
+      {/* 1. SCREEN VIEW LAYER (Visible in Web UI Browser only) */}
+      <div className="report-shell screen-only" id="dashboard-pdf-root">
+        <div className="report-header">
+          <div>
+            <span className="eyebrow">Contract review</span>
+            <h2>{data?.filename || 'Uploaded document'}</h2>
+            <p>{clauses.length} clauses reviewed. Focus on the items that may need a closer look.</p>
+          </div>
+          <button className="secondary-button" onClick={() => downloadAsPDF(data?.filename)}>
+            <Download size={17} /> Save as PDF
+          </button>
         </div>
-        <div className="hero-meta compact">
-          <div className="hero-meta-card">
-            <span>Document Size</span>
-            <strong>{((metadata.doc_length_chars || 0) / 1024).toFixed(2)} KB</strong>
-          </div>
-          <div className="hero-meta-card">
-            <span>Average Classification Confidence</span>
-            <strong>{averageConfidence}</strong>
-            <small>How sure the system is about clause labels.</small>
-          </div>
-          <div className="hero-meta-card">
-            <span>Most Exposed Area</span>
-            <strong>{highestClause?.type || 'No clause detected'}</strong>
-          </div>
-        </div>
-      </div>
 
-      {isContractAnalysis && (
-        <>
-          {/* EXECUTIVE STRIP */}
-          <div className="executive-strip compact">
-            <div className="glass-panel executive-card executive-card-high">
-              <h3>High Risk</h3>
-              <div className="executive-value-row"><span className="value">{highRiskCount}</span><AlertTriangle color="var(--risk-high)" size={24}/></div>
-            </div>
-            <div className="glass-panel executive-card executive-card-medium">
-              <h3>Medium Risk</h3>
-              <div className="executive-value-row"><span className="value">{mediumRiskCount}</span><FileSearch color="var(--risk-medium)" size={24}/></div>
-            </div>
-            <div className="glass-panel executive-card executive-card-low">
-              <h3>Standard</h3>
-              <div className="executive-value-row"><span className="value">{safeCount}</span><ShieldCheck color="var(--risk-low)" size={24}/></div>
-            </div>
-            <div className="glass-panel executive-card executive-card-neutral">
-              <h3>Total Clauses</h3>
-              <div className="executive-value-row"><span className="value">{analysisPayload.total_clauses_analyzed ?? clauses.length}</span><FileText color="var(--accent-color)" size={24}/></div>
-            </div>
+        <section className="overview-card">
+          <div className="overview-score">
+            <span>Review overview</span>
+            <strong>{counts.HIGH > 0 ? 'Action recommended' : counts.MEDIUM > 0 ? 'Some review advised' : 'No major flags'}</strong>
+            <p>Automated issue-spotting, not a legal conclusion.</p>
           </div>
-
-          {/* INSIGHT GRID */}
-          <div className="insight-grid compact">
-            <section className="glass-panel priority-panel">
-              <div className="panel-head"><Target size={18}/><h3>Top Priorities</h3></div>
-              {topRecommendations.length > 0
-                ? <ul className="priority-list compact">{topRecommendations.slice(0,5).map((item,i) => <li key={i}>{item}</li>)}</ul>
-                : <p className="detail-empty">No urgent negotiation themes surfaced at the document level.</p>}
-            </section>
-            <section className="glass-panel spotlight-panel">
-              <div className="panel-head"><Sparkles size={18}/><h3>Clause Spotlight</h3></div>
-              {highestClause
-                ? <div className="spotlight-body compact">
-                    <div className="spotlight-topline"><span>{highestClause.type}</span><RiskBadge level={highestClause.risk_level}/></div>
-                    <p>{highestClause.risk_summary || highestClause.risk_reason}</p>
-                  </div>
-                : <p className="detail-empty">Upload a contract to generate a clause spotlight.</p>}
-            </section>
+          <div className="risk-counts">
+            {['HIGH', 'MEDIUM', 'LOW'].map((level) => (
+              <div key={level} className={`risk-count ${level.toLowerCase()}`}>
+                <strong>{counts[level]}</strong>
+                <span>{RISK_COPY[level].short}</span>
+              </div>
+            ))}
           </div>
+        </section>
 
-          {/* ANALYTICS GRID */}
-          <div className="analytics-grid">
-            <section className="glass-panel analytics-panel">
-              <div className="panel-head"><Grid2X2 size={18}/><h3>Risk Map</h3></div>
-              <p className="analytics-copy">This shows which clause types have more high, medium, or low risk items.</p>
-              {heatmapRows.length > 0 ? (
-                <div className="heatmap-table">
-                  <div className="heatmap-header heatmap-cell type-cell">Clause type</div>
-                  {RISK_LEVEL_ORDER.map(l => <div key={l} className="heatmap-header heatmap-cell">{l[0]+l.slice(1).toLowerCase()}</div>)}
-                  <div className="heatmap-header heatmap-cell total-cell">Count</div>
-                  {heatmapRows.flatMap(row => [
-                    <div key={`${row.type}-label`} className="heatmap-cell type-cell heatmap-type-label">
-                      <strong>{row.displayType}</strong><span>Avg risk {row.averageScore}</span>
-                    </div>,
-                    ...RISK_LEVEL_ORDER.map(level => {
-                      const count = row[level.toLowerCase()];
-                      return <div key={`${row.type}-${level}`} className={`heatmap-cell heatmap-value ${getHeatClass(count)} risk-${level.toLowerCase()}`}><strong>{count}</strong></div>;
-                    }),
-                    <div key={`${row.type}-total`} className="heatmap-cell total-cell heatmap-total">
-                      <strong>{row.total}</strong><span>{row.averageConfidence}% AI confidence</span>
-                    </div>,
-                  ])}
-                </div>
-              ) : <p className="detail-empty">Upload a contract to populate the heatmap.</p>}
-            </section>
-            <section className="glass-panel analytics-panel">
-              <div className="panel-head"><ShieldAlert size={18}/><h3>Risk Split</h3></div>
-              <p className="analytics-copy">Hover over the chart to see how much of the document falls into each risk level.</p>
-              <DonutChart clauses={clauses} highRiskCount={highRiskCount} mediumRiskCount={mediumRiskCount} safeCount={safeCount} riskPosture={riskPosture}/>
-            </section>
-          </div>
+        {keyRecommendations.length > 0 && (
+          <section className="priority-card">
+            <span className="section-label">Start here</span>
+            <h3>Key points to review</h3>
+            <ul>{keyRecommendations.map((item) => <li key={item}>{item}</li>)}</ul>
+          </section>
+        )}
 
-          {/* CLAUSE BREAKDOWN */}
-          <div className="glass-panel compact-panel">
-            <div className="section-head">
-              <div><h2>Clause Breakdown</h2><p>Confidence is shown up front. Open details only when you want extra evidence.</p></div>
+        <section className="clauses-section">
+          {data?.libraryIndexing === 'scheduled' && (
+            <div className="library-status">
+              <BookOpen size={16} />
+              This document is being added to your private clause library.
             </div>
-            <div className="filter-row">
-              {['ALL','HIGH','MEDIUM','LOW'].map(level => (
-                <button key={level} type="button"
-                  className={`filter-chip ${riskFilter === level ? 'active' : ''}`}
-                  onClick={() => setRiskFilter(level)} data-html2canvas-ignore="true">
-                  {level === 'ALL' ? 'All clauses' : `${level} risk`}
+          )}
+          <div className="section-heading">
+            <div>
+              <span className="section-label">Clause review</span>
+              <h3>Review by priority</h3>
+            </div>
+            <div className="filter-tabs" aria-label="Filter clauses by risk">
+              {['ALL', 'HIGH', 'MEDIUM', 'LOW'].map((level) => (
+                <button
+                  key={level}
+                  type="button"
+                  className={riskFilter === level ? 'active' : ''}
+                  onClick={() => setRiskFilter(level)}
+                >
+                  {level === 'ALL' ? `All ${clauses.length}` : `${RISK_COPY[level].short} ${counts[level]}`}
                 </button>
               ))}
             </div>
-            <div className="clause-list compact">
-              {filteredClauses.map((clause,idx) => <ClauseCard key={idx} clause={clause} idx={idx}/>)}
-              {filteredClauses.length === 0 && <p>No clauses match the selected filter.</p>}
-            </div>
           </div>
-        </>
-      )}
 
-      {isSummary && (
-        <div className="glass-panel compact-panel">
-          <div style={{ display:'flex', alignItems:'center', gap:'1rem', marginBottom:'1.5rem' }}>
-            <CheckCircle2 color="var(--risk-low)" size={32}/>
-            <h2>AI Summary Generated</h2>
+          <div className="clause-list">
+            {filtered.map((clause) => {
+              const originalIndex = clauses.indexOf(clause);
+              return (
+                <ClauseCard
+                  key={`clause-${originalIndex}`}
+                  clause={clause}
+                  number={originalIndex + 1}
+                  documentHash={metadata.document_hash}
+                  sourceFilename={metadata.source_filename || data?.filename}
+                />
+              );
+            })}
+            {filtered.length === 0 && <div className="empty-state">No clauses in this category.</div>}
           </div>
-          <div className="summary-box">{extractSummary(data) || 'Summarization failed or returned empty.'}</div>
+        </section>
+      </div>
+
+      {/* 2. PRINT DESIGN LAYER (Hidden on screen, generated perfectly into the PDF structure) */}
+      <div className="print-only-template">
+        <div className="print-pdf-header">
+          <h1>Contract Review Audit Report</h1>
+          <p className="print-meta-line"><strong>Source Document:</strong> {data?.filename || 'Legal Document'}</p>
+          <p className="print-meta-line"><strong>Total Clauses Flagged:</strong> {clauses.length}</p>
         </div>
-      )}
-    </div>
+
+        <div className="print-metrics-summary">
+          <div className="print-metric-box high-risk">Needs Attention (High): {counts.HIGH}</div>
+          <div className="print-metric-box medium-risk">Review Advised (Medium): {counts.MEDIUM}</div>
+          <div className="print-metric-box low-risk">Standard Flags (Low): {counts.LOW}</div>
+        </div>
+
+        {/* High Risk Items Chapter */}
+        {counts.HIGH > 0 && (
+          <section className="print-pdf-section">
+            <h2 className="print-section-heading high">1. High Risk Items (Action Recommended)</h2>
+            {clauses.filter(c => c.risk_level === 'HIGH').map((clause) => {
+              const idx = clauses.indexOf(clause);
+              return (
+                <div key={`print-high-${idx}`} className="print-clause-item-block high">
+                  <h3>Clause {idx + 1}: {formatClauseType(clause.type)}</h3>
+                  <p className="print-risk-explanation"><strong>Risk Reason:</strong> {clause.risk_summary || clause.risk_reason}</p>
+                  {clause.recommendations?.[0] && <p className="print-recom"><strong>Recommendation:</strong> {clause.recommendations[0]}</p>}
+                  <blockquote className="print-original-text">"{clause.clause_text}"</blockquote>
+                </div>
+              );
+            })}
+          </section>
+        )}
+
+        {/* Medium Risk Items Chapter */}
+        {counts.MEDIUM > 0 && (
+          <section className="print-pdf-section">
+            <h2 className="print-section-heading medium">2. Medium Risk Items (Review Advised)</h2>
+            {clauses.filter(c => c.risk_level === 'MEDIUM').map((clause) => {
+              const idx = clauses.indexOf(clause);
+              return (
+                <div key={`print-med-${idx}`} className="print-clause-item-block medium">
+                  <h3>Clause {idx + 1}: {formatClauseType(clause.type)}</h3>
+                  <p className="print-risk-explanation"><strong>Analysis Notes:</strong> {clause.risk_summary || clause.risk_reason}</p>
+                  {clause.recommendations?.[0] && <p className="print-recom"><strong>Recommendation:</strong> {clause.recommendations[0]}</p>}
+                  <blockquote className="print-original-text">"{clause.clause_text}"</blockquote>
+                </div>
+              );
+            })}
+          </section>
+        )}
+
+        {/* Low Risk Items Chapter */}
+        {counts.LOW > 0 && (
+          <section className="print-pdf-section">
+            <h2 className="print-section-heading low">3. Standard / Low Risk Items</h2>
+            {clauses.filter(c => c.risk_level === 'LOW').map((clause) => {
+              const idx = clauses.indexOf(clause);
+              return (
+                <div key={`print-low-${idx}`} className="print-clause-item-block low">
+                  <h3>Clause {idx + 1}: {formatClauseType(clause.type)}</h3>
+                  <blockquote className="print-original-text">"{clause.clause_text}"</blockquote>
+                </div>
+              );
+            })}
+          </section>
+        )}
+      </div>
+    </>
   );
 };
 

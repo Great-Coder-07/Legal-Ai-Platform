@@ -1,3 +1,4 @@
+import os
 import re
 
 
@@ -12,53 +13,88 @@ WORD_TO_NUMBER = {
     "eight": 8,
     "nine": 9,
     "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+
+CONFIDENTIALITY_CATEGORIES = {
+    "confidentiality",
+    "confidentiality_definition",
+    "permitted_disclosure",
+    "return_of_information",
+}
+
+JURISDICTION_ALIASES = {
+    "india": ("india", "indian"),
+    "delaware": ("delaware",),
+    "california": ("california",),
+    "new_york": ("new york", "new york state"),
+    "texas": ("texas",),
+    "england_wales": ("england and wales", "england & wales", "england", "wales"),
+    "scotland": ("scotland",),
+    "singapore": ("singapore",),
+    "australia": ("australia",),
+    "canada": ("canada",),
+    "ireland": ("ireland",),
 }
 
 
 def _normalize_clause_type(clause_type: str) -> str:
     normalized = (clause_type or "").strip().lower()
 
+    # Specific confidentiality sub-types must be checked before the broad
+    # "confidential" match.
+    if "return or destruction" in normalized or "return or destroy" in normalized:
+        return "return_of_information"
+    if "permitted disclosure" in normalized or "exceptions" in normalized:
+        return "permitted_disclosure"
+    if "definition of confidential" in normalized:
+        return "confidentiality_definition"
     if "termination" in normalized:
         return "termination"
     if "governing law" in normalized or "jurisdiction" in normalized:
         return "governing_law"
     if "force majeure" in normalized:
         return "force_majeure"
-    if "payment" in normalized:
+    if "payment" in normalized or "salary" in normalized:
         return "payment"
-    if "liability" in normalized:
+    if "liability" in normalized or "damages" in normalized:
         return "liability"
     if "intellectual property" in normalized or "ownership" in normalized or "license" in normalized:
         return "ip"
     if "confidential" in normalized or "non-disclosure" in normalized:
         return "confidentiality"
-    if "return or destruction" in normalized:
-        return "return_of_information"
     if "injunctive relief" in normalized or "remedies" in normalized:
         return "remedies"
-    if "term and duration" in normalized or "duration" in normalized:
+    if "term and duration" in normalized or normalized == "duration":
         return "duration"
-    return normalized
+    if "dispute resolution" in normalized or "arbitration" in normalized:
+        return "dispute_resolution"
+    return normalized or "unclassified"
 
 
-def _extract_years(text: str):
-    digit_with_parens_match = re.search(r"\b[a-z]+\s*\((\d+)\)\s*year[s]?\b", text)
-    if digit_with_parens_match:
-        return int(digit_with_parens_match.group(1))
+def _extract_duration(text: str) -> tuple[int | None, str | None]:
+    number_pattern = "|".join(WORD_TO_NUMBER)
+    patterns = (
+        (rf"\b(?:[a-z]+\s*)?\((\d+)\)\s*(years?|months?)\b", True),
+        (r"\b(\d+)\s*(years?|months?)\b", True),
+        (rf"\b({number_pattern})\s+(years?|months?)\b", False),
+    )
 
-    digit_match = re.search(r"\b(\d+)\s+year[s]?\b", text)
-    if digit_match:
-        return int(digit_match.group(1))
+    for pattern, numeric in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        amount = int(match.group(1)) if numeric else WORD_TO_NUMBER[match.group(1)]
+        unit = match.group(2)
+        months = amount * 12 if unit.startswith("year") else amount
+        return months, match.group(0)
 
-    word_match = re.search(r"\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+year[s]?\b", text)
-    if word_match:
-        return WORD_TO_NUMBER[word_match.group(1)]
-
-    return None
+    return None, None
 
 
 def _append_unique(items: list, value: str) -> None:
-    if value not in items:
+    if value and value not in items:
         items.append(value)
 
 
@@ -80,6 +116,8 @@ def _add_risk(
     evidence: str,
     recommendation: str | None = None,
 ) -> int:
+    if any(rule["rule_id"] == rule_id for rule in matched_rules):
+        return 0
     matched_rules.append(
         {
             "rule_id": rule_id,
@@ -88,13 +126,20 @@ def _add_risk(
             "evidence": evidence,
         }
     )
-    reasons.append(label)
+    _append_unique(reasons, label)
     if recommendation:
         _append_unique(recommendations, recommendation)
     return impact
 
 
-def _add_positive(positive_signals: list, label: str, evidence: str, impact: int = 0) -> None:
+def _add_positive(
+    positive_signals: list,
+    label: str,
+    evidence: str,
+    impact: int = 0,
+) -> int:
+    if any(signal["label"] == label for signal in positive_signals):
+        return 0
     positive_signals.append(
         {
             "label": label,
@@ -102,245 +147,300 @@ def _add_positive(positive_signals: list, label: str, evidence: str, impact: int
             "impact": impact,
         }
     )
+    return impact
 
 
 def _summarize_clause(level: str, reasons: list, positives: list) -> str:
     if reasons:
-        if len(reasons) == 1 and reasons[0] == "Standard clause":
-            return "No major risk signals detected."
-        return f"{level} risk driven by: {', '.join(reasons[:3])}."
+        return f"{level} review priority driven by: {', '.join(reasons[:3])}."
     if positives:
         labels = ", ".join(item["label"] for item in positives[:2])
-        return f"{level} risk with protective signals such as {labels}."
-    return "LOW risk with no major red flags detected."
+        return f"{level} review priority with protective signals such as {labels}."
+    return "LOW review priority; no material rule-based concerns detected."
 
 
-def assess_risk(clause_text: str, clause_type: str) -> dict:
-    text = (clause_text or "").lower()
+def _jurisdiction_key(value: str) -> str:
+    normalized = re.sub(r"[^a-z_ ]", "", (value or "").strip().lower()).replace(" ", "_")
+    for key, aliases in JURISDICTION_ALIASES.items():
+        if normalized == key or any(normalized == alias.replace(" ", "_") for alias in aliases):
+            return key
+    return normalized
+
+
+def _detect_jurisdiction(text: str) -> tuple[str | None, str]:
+    for key, aliases in JURISDICTION_ALIASES.items():
+        for alias in sorted(aliases, key=len, reverse=True):
+            match = re.search(rf"\b{re.escape(alias)}\b", text)
+            if match:
+                return key, match.group(0)
+    return None, ""
+
+
+def assess_risk(
+    clause_text: str,
+    clause_type: str,
+    home_jurisdiction: str | None = None,
+) -> dict:
+    """
+    Produce a conservative issue-spotting score for contract review.
+
+    Scores indicate review priority, not enforceability or a legal conclusion:
+      LOW: 0-1, MEDIUM: 2-4, HIGH: 5+
+    """
+    text = re.sub(r"\s+", " ", (clause_text or "").lower()).strip()
     category = _normalize_clause_type(clause_type)
+    home_jurisdiction_key = _jurisdiction_key(
+        home_jurisdiction or os.getenv("LEGAL_HOME_JURISDICTION", "india")
+    )
     score = 0
-    reasons = []
-    matched_rules = []
-    positive_signals = []
-    recommendations = []
+    reasons: list[str] = []
+    matched_rules: list[dict] = []
+    positive_signals: list[dict] = []
+    recommendations: list[str] = []
 
-    if (
-        "unlimited liability" in text
-        or ("liability" in text and re.search(r"\bunlimited\b|\bwithout\s+financial\s+cap\b|\bwithout\s+any\s+cap\b|\bno\s+limit\b", text))
-        or re.search(r"\bwithout\s+(?:financial\s+)?limit\b", text)
-    ):
-        score += _add_risk(
-            matched_rules,
-            reasons,
-            recommendations,
-            "liability_unlimited",
-            "Unlimited liability exposure",
-            6,
-            _extract_evidence(text, [r"unlimited liability", r"\bwithout\s+(?:financial\s+)?limit\b", r"no limit"]),
-            "Add a clear monetary cap on liability tied to fees paid or a fixed amount.",
-        )
-
-    if "indirect damages" in text and "exclude" not in text:
-        score += _add_risk(
-            matched_rules,
-            reasons,
-            recommendations,
-            "damages_indirect",
-            "Indirect damages not excluded",
-            2,
-            "indirect damages",
-            "Exclude indirect and special damages where commercially possible.",
-        )
-
-    if "consequential damages" in text and "exclude" not in text:
-        score += _add_risk(
-            matched_rules,
-            reasons,
-            recommendations,
-            "damages_consequential",
-            "Consequential damages not excluded",
-            2,
-            "consequential damages",
-            "Add an exclusion for consequential damages.",
-        )
-
-    if re.search(r"\bliability cap\b|\bcapped at\b|\blimited to\b", text):
-        score -= 1
-        _add_positive(
+    cap_pattern = re.search(
+        r"\b(?:aggregate )?liability\b.{0,60}\b(?:capped at|limited to|shall not exceed)\b"
+        r"|\b(?:capped at|limited to|shall not exceed)\b.{0,60}\b(?:fees paid|liability)\b",
+        text,
+    )
+    if cap_pattern:
+        score += _add_positive(
             positive_signals,
             "Liability cap present",
-            _extract_evidence(text, [r"liability cap", r"capped at", r"limited to"]),
+            cap_pattern.group(0),
             -1,
         )
 
-    if "exclude" in text and ("indirect damages" in text or "consequential damages" in text):
-        _add_positive(
-            positive_signals,
-            "Damages exclusion present",
-            _extract_evidence(text, [r"exclude.{0,40}indirect damages", r"exclude.{0,40}consequential damages"]),
+    # Liability and damages
+    if category == "liability":
+        unlimited_pattern = re.search(
+            r"\bunlimited liability\b"
+            r"|\bliability\b.{0,35}\b(?:is |shall be )?unlimited\b"
+            r"|\bliability\b.{0,35}\b(?:without (?:any |financial )?cap|without (?:financial )?limit|no limit)\b",
+            text,
         )
+        if unlimited_pattern:
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "liability_unlimited",
+                "Unlimited liability exposure",
+                6,
+                unlimited_pattern.group(0),
+                "Consider a clear monetary cap and review any justified carve-outs separately.",
+            )
 
-    if "without cause" in text:
-        score += _add_risk(
-            matched_rules,
-            reasons,
-            recommendations,
-            "termination_without_cause",
-            "Termination without cause",
-            3,
-            "without cause",
-            "Require a minimum written notice period for no-cause termination.",
+        exclusion_pattern = re.search(
+            r"\b(?:not liable for|neither party.{0,25}liable for|exclude[sd]?|excluding)\b.{0,60}"
+            r"\b(?:indirect|consequential|special|incidental)\b.{0,35}\bdamages\b",
+            text,
         )
+        mentions_indirect = re.search(r"\b(?:indirect|consequential)\b.{0,25}\bdamages\b", text)
+        if mentions_indirect and not exclusion_pattern:
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "damages_not_excluded",
+                "Indirect or consequential damages not clearly excluded",
+                2,
+                mentions_indirect.group(0),
+                "Clarify whether indirect, consequential, special, and incidental damages are excluded.",
+            )
+        elif exclusion_pattern:
+            score += _add_positive(
+                positive_signals,
+                "Damages exclusion present",
+                exclusion_pattern.group(0),
+            )
 
-    if "immediate termination" in text or re.search(r"\bterminate\b.{0,20}\bimmediately\b", text):
-        score += _add_risk(
-            matched_rules,
-            reasons,
-            recommendations,
-            "termination_immediate",
-            "Immediate termination",
-            2,
-            "immediate termination",
-            "Limit immediate termination to material breach, illegality, or serious misconduct.",
-        )
+    # Termination
+    if category == "termination":
+        if "without cause" in text:
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "termination_without_cause",
+                "Termination without cause",
+                3,
+                "without cause",
+                "Consider a reasonable written notice period for no-cause termination.",
+            )
 
-    if category == "termination" and ("without notice" in text or "no notice" in text):
-        score += _add_risk(
-            matched_rules,
-            reasons,
-            recommendations,
-            "termination_without_notice",
-            "Termination without notice",
-            2,
-            _extract_evidence(text, [r"without notice", r"no notice"]),
-            "Add a notice requirement such as 15 to 30 days before termination takes effect.",
-        )
-    elif category == "termination" and "notice" not in text:
-        score += _add_risk(
-            matched_rules,
-            reasons,
-            recommendations,
-            "termination_no_notice",
-            "No notice period",
-            2,
-            "notice not found",
-            "Add a notice requirement such as 15 to 30 days before termination takes effect.",
-        )
-    elif category == "termination" and "notice" in text:
-        _add_positive(
-            positive_signals,
-            "Notice period present",
-            _extract_evidence(text, [r"\bnotice\b"]),
-        )
+        immediate_match = re.search(r"\bimmediate termination\b|\bterminate\b.{0,25}\bimmediately\b", text)
+        if immediate_match:
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "termination_immediate",
+                "Immediate termination right",
+                2,
+                immediate_match.group(0),
+                "Limit immediate termination to defined serious events such as material breach or illegality.",
+            )
 
-    if "cure period" in text:
-        score -= 1
-        _add_positive(
-            positive_signals,
-            "Cure period present",
-            "cure period",
-            -1,
-        )
+        if re.search(r"\bwithout (?:prior |written )?notice\b|\bno notice\b", text):
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "termination_without_notice",
+                "Termination without notice",
+                2,
+                _extract_evidence(text, [r"without (?:prior |written )?notice", r"no notice"]),
+                "Consider a commercially reasonable notice period.",
+            )
+        elif "notice" not in text and ("terminate" in text or "termination" in text):
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "termination_no_notice",
+                "No notice period stated",
+                2,
+                "notice not found",
+                "State the required notice period and delivery method.",
+            )
+        else:
+            score += _add_positive(
+                positive_signals,
+                "Notice period present",
+                _extract_evidence(text, [r"\bnotice\b"]),
+            )
 
-    years = _extract_years(text)
-    if years is not None:
-        if years >= 5:
+        cure_match = re.search(r"\b(?:cure period|opportunity to cure|days? to cure)\b", text)
+        if cure_match:
+            score += _add_positive(
+                positive_signals,
+                "Cure period present",
+                cure_match.group(0),
+                -1,
+            )
+
+    # Duration. A conventional fixed term is informational, not inherently risky.
+    duration_months, duration_evidence = _extract_duration(text)
+    if category in {"confidentiality", "duration"} and duration_months is not None:
+        if duration_months >= 60:
             score += _add_risk(
                 matched_rules,
                 reasons,
                 recommendations,
                 "duration_long",
-                f"Long duration ({years} years)",
+                f"Long duration ({duration_months // 12} years)",
                 2,
-                f"{years} years",
-                "Consider narrowing the confidentiality survival period unless trade secrets require longer coverage.",
-            )
-        elif years >= 2:
-            score += _add_risk(
-                matched_rules,
-                reasons,
-                recommendations,
-                "duration_moderate",
-                f"Moderate duration ({years} years)",
-                1,
-                f"{years} years",
+                duration_evidence or "",
+                "Confirm that the duration is proportionate to the information and commercial need.",
             )
         else:
-            _add_positive(
+            score += _add_positive(
                 positive_signals,
-                f"Short duration ({years} years)",
-                f"{years} years",
+                f"Defined duration ({duration_evidence})",
+                duration_evidence or "",
             )
 
-    if "perpetual" in text:
+    if category in {"confidentiality", "duration"} and re.search(r"\bperpetual(?:ly)?\b|\bindefinite(?:ly)?\b", text):
         score += _add_risk(
             matched_rules,
             reasons,
             recommendations,
             "duration_perpetual",
-            "Perpetual obligation",
+            "Open-ended confidentiality duration",
             3,
-            "perpetual",
-            "Limit perpetual obligations to trade secrets instead of all confidential information.",
+            _extract_evidence(text, [r"perpetual(?:ly)?", r"indefinite(?:ly)?"]),
+            "Consider limiting ordinary confidential information while preserving appropriate protection for trade secrets.",
         )
 
+    # Confidentiality and disclosure
     if "required by law" in text or "court order" in text:
-        _add_positive(
+        score += _add_positive(
             positive_signals,
             "Standard legal disclosure carve-out",
             _extract_evidence(text, [r"required by law", r"court order"]),
         )
 
-    if category == "payment":
-        if "non-refundable" in text:
+    if (
+        category == "confidentiality"
+        and duration_months is None
+        and not re.search(r"\bperpetual(?:ly)?\b|\bindefinite(?:ly)?\b|\bno expir", text)
+    ):
+        score += _add_risk(
+            matched_rules,
+            reasons,
+            recommendations,
+            "no_duration",
+            "No confidentiality duration specified",
+            2,
+            "duration not found",
+            "State a duration, with separate treatment where trade-secret protection should continue.",
+        )
+
+    if category == "confidentiality_definition":
+        broad_match = re.search(
+            r"\bany and all (?:information|data)\b"
+            r"|\ball information\b.{0,60}\b(?:confidential|proprietary)\b",
+            text,
+        )
+        exclusion_terms = (
+            "public domain",
+            "already known",
+            "independently developed",
+            "rightfully received",
+        )
+        if broad_match and not any(term in text for term in exclusion_terms):
             score += _add_risk(
                 matched_rules,
                 reasons,
                 recommendations,
-                "payment_non_refundable",
-                "Non-refundable terms",
+                "broad_definition",
+                "Broad confidentiality definition without clear exclusions",
                 2,
-                "non-refundable",
-                "Tie non-refundable amounts to defined milestones or services actually delivered.",
+                broad_match.group(0),
+                "Add customary exclusions for public, previously known, independently developed, and lawfully received information.",
             )
 
-    if category == "governing_law":
-        known_jurisdictions = [
-            "india", "england", "wales", "scotland", "uk", "united kingdom",
-            "delaware", "california", "new york", "new york state",
-            "singapore", "australia", "canada", "ireland"
-        ]
-        if not any(j in text for j in known_jurisdictions):
-            score += _add_risk(
-                matched_rules,
-                reasons,
-                recommendations,
-                "governing_law_foreign",
-                "Unusual or unrecognised jurisdiction",
-                2,
-                _extract_evidence(text, [r"laws of [a-z\s]+", r"jurisdiction of [a-z\s]+"]),
-                "Confirm whether the dispute venue and governing law are operationally acceptable.",
-            )
-        else:
-            _add_positive(
-                positive_signals,
-                "Recognised jurisdiction",
-                _extract_evidence(text, [r"india|england|wales|delaware|singapore|california"]),
-            )
-
-    if "regulatory" in text and "required by law" not in text and "court order" not in text:
+    if category == "permitted_disclosure" and "regulatory" in text and "required by law" not in text:
         score += _add_risk(
             matched_rules,
             reasons,
             recommendations,
             "disclosure_regulatory_broad",
-            "Broad regulatory disclosure language",
-            1,
+            "Regulatory disclosure wording is not limited to mandatory disclosures",
+            2,
             "regulatory",
-            "Narrow regulatory disclosure language to required disclosures only.",
+            "Limit disclosure to what applicable law or a competent authority requires.",
         )
 
-    if "return or destroy" in text:
+    if category in {"confidentiality", "return_of_information"}:
+        receiving_obligation = re.search(r"\breceiving party\s+(?:shall|must|agrees|will)\b", text)
+        mutual_language = (
+            re.search(r"\bdisclosing party\s+(?:shall|must|agrees|will)\b", text)
+            or re.search(r"\beach party\s+(?:shall|must|agrees|will)\b", text)
+            or "both parties" in text
+            or "mutual" in text
+        )
+        if receiving_obligation and not mutual_language:
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "one_sided_receiving_party",
+                "One-sided confidentiality obligation",
+                2,
+                receiving_obligation.group(0),
+                "Confirm that a one-way NDA is intended; otherwise use reciprocal obligations.",
+            )
+        elif receiving_obligation and mutual_language:
+            score += _add_positive(
+                positive_signals,
+                "Mutual obligations present",
+                "mutual party obligations",
+            )
+
+    return_destroy = re.search(r"\breturn (?:or|and) destroy\b|\bdestroy (?:or|and) return\b", text)
+    if category == "return_of_information" and return_destroy:
         score += _add_risk(
             matched_rules,
             reasons,
@@ -348,44 +448,127 @@ def assess_risk(clause_text: str, clause_type: str) -> dict:
             "return_destroy",
             "Return or destruction obligation",
             1,
-            "return or destroy",
-            "Add operational carve-outs for backups, legal archives, or automatically retained records if needed.",
+            return_destroy.group(0),
+            "Check practical carve-outs for backups, legal holds, and automatically retained records.",
         )
 
-    if "certify in writing" in text:
+    if category == "return_of_information" and "certify in writing" in text:
         score += _add_risk(
             matched_rules,
             reasons,
             recommendations,
             "return_certification",
-            "Formal compliance requirement",
+            "Written destruction certification required",
             1,
             "certify in writing",
-            "Confirm the team can comply with written certification timelines.",
+            "Confirm who can certify compliance and within what period.",
         )
 
-    if "survive termination" in text or "continuing obligations" in text:
+    if category in CONFIDENTIALITY_CATEGORIES and re.search(
+        r"\bshared freely\b|\bwithout restriction\b|\bfreely shared\b", text
+    ):
         score += _add_risk(
             matched_rules,
             reasons,
             recommendations,
-            "survival_obligations",
-            "Obligations survive termination",
-            2,
-            _extract_evidence(text, [r"survive termination", r"continuing obligations"]),
-            "Check which obligations survive and whether the survival period is clearly limited.",
+            "unrestricted_sharing",
+            "Information may be shared without restriction",
+            4,
+            _extract_evidence(text, [r"shared freely", r"without restriction", r"freely shared"]),
+            "Define permitted recipients, purpose limitations, and required safeguards.",
         )
 
-    if "injunctive relief" in text or "irreparable harm" in text:
+    if category in {"confidentiality", "confidentiality_definition"} and re.search(
+        r"\b(?:oral|verbal)\b.{0,60}\b(?:confidential|disclos|information)\b", text
+    ):
+        score += _add_risk(
+            matched_rules,
+            reasons,
+            recommendations,
+            "oral_disclosures",
+            "Oral disclosures included without a confirmation mechanism",
+            1,
+            _extract_evidence(text, [r"(?:oral|verbal).{0,50}(?:confidential|disclos|information)"]),
+            "Consider requiring oral disclosures to be identified or confirmed in writing within a set period.",
+        )
+
+    survival_match = re.search(r"\bsurviv(?:e|es|al)\b.{0,35}\btermination\b", text)
+    if category in CONFIDENTIALITY_CATEGORIES and survival_match:
+        if duration_months is None and not re.search(r"\btrade secrets?\b", text):
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "survival_unlimited",
+                "Post-termination obligations have no stated limit",
+                2,
+                survival_match.group(0),
+                "Define the survival period, with tailored treatment for trade secrets where appropriate.",
+            )
+        else:
+            score += _add_positive(
+                positive_signals,
+                "Defined post-termination protection",
+                survival_match.group(0),
+            )
+
+    # Governing law is an operational review point, not a statement that the
+    # selected law is invalid or inferior.
+    if category == "governing_law":
+        detected_jurisdiction, jurisdiction_evidence = _detect_jurisdiction(text)
+        if detected_jurisdiction and detected_jurisdiction != home_jurisdiction_key:
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "governing_law_foreign",
+                "Non-home governing law or forum",
+                2,
+                jurisdiction_evidence,
+                "Confirm cost, counsel availability, dispute venue, and enforceability implications for the parties.",
+            )
+        elif detected_jurisdiction == home_jurisdiction_key:
+            score += _add_positive(
+                positive_signals,
+                "Home jurisdiction selected",
+                jurisdiction_evidence,
+            )
+        else:
+            score += _add_risk(
+                matched_rules,
+                reasons,
+                recommendations,
+                "governing_law_unclear",
+                "Governing law or forum is unclear",
+                2,
+                "jurisdiction not identified",
+                "Specify the governing law and the court or arbitration forum.",
+            )
+
+    # Payment
+    if category == "payment" and "non-refundable" in text:
+        score += _add_risk(
+            matched_rules,
+            reasons,
+            recommendations,
+            "payment_non_refundable",
+            "Non-refundable payment",
+            2,
+            "non-refundable",
+            "Tie non-refundable amounts to defined work, milestones, or committed costs.",
+        )
+
+    # Remedies and control
+    if category == "remedies" and ("injunctive relief" in text or "irreparable harm" in text):
         score += _add_risk(
             matched_rules,
             reasons,
             recommendations,
             "remedy_injunctive_relief",
-            "Injunctive relief clause",
+            "Injunctive-relief provision",
             2,
             _extract_evidence(text, [r"injunctive relief", r"irreparable harm"]),
-            "Verify whether court-based injunctive relief is acceptable alongside any arbitration clause.",
+            "Check whether the remedy is mutual and consistent with the dispute-resolution clause.",
         )
 
     if "sole discretion" in text:
@@ -394,175 +577,78 @@ def assess_risk(clause_text: str, clause_type: str) -> dict:
             reasons,
             recommendations,
             "control_sole_discretion",
-            "Unilateral control",
+            "Unilateral discretion",
             2,
             "sole discretion",
-            "Replace sole-discretion rights with objective standards or mutual approval where possible.",
+            "Consider objective standards, reasonableness, or mutual approval where appropriate.",
         )
 
-    if "receiving party shall" in text and "disclosing party shall" not in text:
-        score += _add_risk(
-            matched_rules,
-            reasons,
-            recommendations,
-            "one_sided_receiving_party",
-            "One-sided obligation",
-            2,
-            "receiving party shall",
-            "Consider adding balanced obligations on both parties or clarifying the clause is intentionally one-way.",
-        )
-    elif "receiving party shall" in text and "disclosing party shall" in text:
-        _add_positive(
-            positive_signals,
-            "Mutual obligations present",
-            "receiving party shall / disclosing party shall",
-        )
-
-    if "transfer of ownership" in text and "no explicit or implied transfer of ownership" not in text:
+    # Intellectual property
+    if category == "ip" and re.search(r"\btransfer of ownership\b", text) and not re.search(
+        r"\bno (?:explicit or implied )?transfer of ownership\b", text
+    ):
         score += _add_risk(
             matched_rules,
             reasons,
             recommendations,
             "ip_transfer_ownership",
-            "Ownership transfer",
+            "Intellectual-property ownership transfer",
             3,
             "transfer of ownership",
-            "Confirm whether ownership transfer is intended or whether a limited-use license would suffice.",
+            "Confirm the intended assets, existing IP carve-outs, and whether a limited license would suffice.",
         )
 
-    if "royalty-free" in text and "irrevocable" in text:
+    if category == "ip" and "royalty-free" in text and "irrevocable" in text:
         score += _add_risk(
             matched_rules,
             reasons,
             recommendations,
             "ip_irrevocable_license",
-            "Irrevocable license",
+            "Irrevocable royalty-free license",
             3,
             _extract_evidence(text, [r"royalty-free", r"irrevocable"]),
-            "Narrow the scope, duration, or sublicensing rights of any irrevocable license.",
+            "Review scope, duration, territory, sublicensing, and permitted purpose.",
         )
 
+    # Force-majeure wording varies by transaction. Missing a single named event
+    # should prompt review, but should not itself increase the risk score.
     if category == "force_majeure":
-        if "pandemic" not in text:
-            score += _add_risk(
-                matched_rules,
-                reasons,
-                recommendations,
-                "force_majeure_limited_scope",
-                "Limited force majeure scope",
-                1,
-                "pandemic not found",
-                "Consider whether epidemics, pandemics, or government shutdowns should be expressly covered.",
+        if re.search(r"\bepidemic\b|\bpandemic\b|\bgovernment(?:al)? action\b", text):
+            score += _add_positive(
+                positive_signals,
+                "Modern disruption events addressed",
+                _extract_evidence(text, [r"epidemic", r"pandemic", r"government(?:al)? action"]),
             )
         else:
-            _add_positive(
-                positive_signals,
-                "Pandemic coverage present",
-                "pandemic",
+            _append_unique(
+                recommendations,
+                "Check whether the listed force-majeure events and notice/mitigation duties fit the transaction.",
             )
-    # ── NDA-specific patterns ─────────────────────────────────────────────
-
-    # Broad confidentiality definition
-    if re.search(r"any\s+(and\s+all|information|data).{0,50}(confidential|proprietary)", text):
-        score += _add_risk(
-            matched_rules, reasons, recommendations,
-            "broad_definition",
-            "Overly broad confidentiality definition",
-            2,
-            _extract_evidence(text, [r"any and all.{0,30}confidential", r"any information.{0,30}confidential"]),
-            "Narrow the definition to specifically identified categories of information.",
-        )
-
-    # No time limit on confidentiality obligations
-    if ("confidential" in text
-            and not re.search(r"\b\d+\s*(year|month)\b|perpetual|indefinite|no\s+expir", text)
-            and category in ("confidentiality", "obligations of confidentiality")):
-        score += _add_risk(
-            matched_rules, reasons, recommendations,
-            "no_duration",
-            "No confidentiality duration specified",
-            2,
-            "duration not found",
-            "Add an explicit confidentiality period, e.g. 2-3 years from date of disclosure.",
-        )
-
-    # One-sided obligations on receiving party
-    has_existing_one_sided_signal = any(
-        rule.get("rule_id") == "one_sided_receiving_party"
-        for rule in matched_rules
-    )
-
-    if (
-        category in ("confidentiality", "obligations of confidentiality")
-        and not has_existing_one_sided_signal
-        and re.search(r"receiving\s+party\s+(shall|must|agrees|will)", text)
-        and not re.search(r"disclosing\s+party\s+(shall|must|agrees|will)", text)
-    ):
-        score += _add_risk(
-            matched_rules, reasons, recommendations,
-            "one_sided",
-            "One-sided obligations on receiving party only",
-            1,
-            "receiving party shall",
-            "Consider whether mutual obligations are appropriate.",
-        )
-
-    # Information shared without restriction
-    if re.search(r"shared\s+freely|without\s+restriction|freely\s+available|freely\s+shared", text):
-        score += _add_risk(
-            matched_rules, reasons, recommendations,
-            "unrestricted_sharing",
-            "Information may be shared without restriction",
-            3,
-            _extract_evidence(text, [r"shared freely", r"without restriction", r"freely available"]),
-            "Add explicit restrictions on disclosure scope and permitted recipients.",
-        )
-
-    # Oral disclosures included
-    if re.search(r"\b(oral|verbal)\b.{0,60}(confidential|disclos|information)", text):
-        score += _add_risk(
-            matched_rules, reasons, recommendations,
-            "oral_disclosures",
-            "Includes oral disclosures",
-            1,
-            _extract_evidence(text, [r"oral.{0,30}confidential", r"verbal.{0,30}disclosure"]),
-            "Consider requiring oral disclosures to be confirmed in writing within a set period.",
-        )
-
-    # Obligations survive termination without limit
-    if re.search(r"surviv(e|es|al).{0,30}termination", text) and \
-       not re.search(r"\b\d+\s*(year|month)\b", text):
-        score += _add_risk(
-            matched_rules, reasons, recommendations,
-            "survival_unlimited",
-            "Survival obligations with no time limit",
-            2,
-            _extract_evidence(text, [r"surviv.{0,20}termination"]),
-            "Define a specific survival period rather than open-ended post-termination obligations.",
-        )
 
     normalized_score = max(score, 0)
-
-    if normalized_score >= 3:
+    if normalized_score >= 5:
         level = "HIGH"
-    elif normalized_score >= 1:
+    elif normalized_score >= 2:
         level = "MEDIUM"
     else:
         level = "LOW"
 
-    if not reasons:
-        reasons.append("Standard clause")
-
     if not recommendations and level == "LOW":
-        recommendations.append("No immediate redraft priority, but confirm the clause aligns with your commercial position.")
+        recommendations.append(
+            "No immediate rule-based redraft priority; confirm the clause fits the transaction and applicable law."
+        )
 
     return {
         "level": level,
         "score": normalized_score,
         "category": category,
-        "reason": "; ".join(reasons),
+        "reason": "; ".join(reasons) if reasons else "No material rule-based concerns detected",
         "summary": _summarize_clause(level, reasons, positive_signals),
         "matched_rules": matched_rules,
         "positive_signals": positive_signals,
         "recommendations": recommendations,
+        "review_notice": (
+            "Automated issue-spotting only. Risk depends on the parties, transaction, bargaining position, "
+            "governing law, and complete agreement."
+        ),
     }

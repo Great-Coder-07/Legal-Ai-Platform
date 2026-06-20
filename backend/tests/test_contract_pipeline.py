@@ -63,7 +63,7 @@ class ContractPipelineTests(unittest.TestCase):
         result = assess_risk(clause, "Remedies and injunctive relief clause")
 
         self.assertEqual(result["level"], "MEDIUM")
-        self.assertIn("Injunctive relief clause", result["reason"])
+        self.assertIn("Injunctive-relief provision", result["reason"])
 
     def test_segmenter_does_not_drop_unnumbered_contract_body(self):
         text = (
