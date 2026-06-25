@@ -16,4 +16,5 @@ pytesseract
 Pillow
 anthropic
 python-dotenv
+python-jose
 groq

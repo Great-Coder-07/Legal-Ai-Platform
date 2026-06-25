@@ -200,7 +200,7 @@ def _distance_to_similarity(distance: float | None) -> float:
 
 def search_similar_clauses(
     query: str,
-    user_id: int,  # 🔒 Senior Dev Fix: Multi-tenant protection anchor
+    user_id: int,  # Multi-tenant protection anchor
     clause_type: str = "",
     exclude_document_hash: str = "",
     exclude_source: str = "",

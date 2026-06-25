@@ -1,28 +1,40 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api';
 import { useAuth } from '../context/AuthContext';
-import { Key, Trash2, Shield, Folder, FileText, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import {
+  Key,
+  Trash2,
+  Shield,
+  Folder,
+  FileText,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  Lock,
+  RefreshCw,
+} from 'lucide-react';
 
 export default function ProfileSection() {
   const { user } = useAuth();
   const [libraryStatus, setLibraryStatus] = useState(null);
   const [loadingStatus, setLoadingStatus] = useState(true);
-  
-  // Password Change States
+  const [libraryError, setLibraryError] = useState('');
+
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [passError, setPassError] = useState('');
   const [passSuccess, setPassSuccess] = useState('');
   const [passLoading, setPassLoading] = useState(false);
 
-  // Load Library metrics scoped to this authenticated user tenant
   const fetchLibraryStatus = async () => {
     try {
       setLoadingStatus(true);
+      setLibraryError('');
       const response = await api.get('/api/clause-library/status');
       setLibraryStatus(response.data);
     } catch (err) {
-      console.error("Failed to fetch tenant library status:", err);
+      console.error('Failed to fetch tenant library status:', err);
+      setLibraryError('We could not load your document library. Please try again.');
     } finally {
       setLoadingStatus(false);
     }
@@ -32,7 +44,6 @@ export default function ProfileSection() {
     fetchLibraryStatus();
   }, []);
 
-  // Handle password modification submit execution
   const handlePasswordChange = async (e) => {
     e.preventDefault();
     setPassError('');
@@ -42,7 +53,7 @@ export default function ProfileSection() {
     try {
       const response = await api.post('/api/auth/change-password', {
         old_password: oldPassword,
-        new_password: newPassword
+        new_password: newPassword,
       });
       setPassSuccess(response.data.message || 'Password updated successfully.');
       setOldPassword('');
@@ -54,81 +65,113 @@ export default function ProfileSection() {
     }
   };
 
-  // Securely delete document chunks from active tenant library scope
   const handleDeleteDocument = async (documentHash) => {
-    if (!window.confirm("Are you sure you want to permanently remove this document and all its matching vector clauses?")) return;
-    
+    if (
+      !window.confirm(
+        'Remove this document from your private library? Indexed clauses will be deleted permanently.'
+      )
+    ) {
+      return;
+    }
+
     try {
       await api.delete(`/api/clause-library/documents/${documentHash}`);
-      // Refresh statistics counts array dynamically
       fetchLibraryStatus();
     } catch (err) {
-      alert(err.response?.data?.detail || "Failed to drop document target pipeline.");
+      alert(err.response?.data?.detail || 'Failed to remove the document.');
     }
   };
 
+  const usernameInitial = user?.username?.charAt(0)?.toUpperCase() || '?';
+
   return (
-    <div className="profile-layout animate-slide-up" style={{ padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>
-      
-      {/* SECTION HEADER BLOCK ROW */}
-      <div className="section-heading" style={{ marginBottom: '2rem' }}>
+    <div className="profile-layout animate-slide-up">
+      <header className="profile-header">
         <div>
-          <span className="section-label">Account Settings</span>
-          <h3>User Profile & Storage Center</h3>
-          <p style={{ color: 'var(--text-secondary)' }}>Manage your personal tenant settings and private RAG vector allocations.</p>
+          <span className="section-label">Account settings</span>
+          <h2 className="profile-title">Profile &amp; storage</h2>
+          <p className="profile-lead">
+            Manage your account security and the documents saved in your private clause library.
+          </p>
+        </div>
+      </header>
+
+      <div className="profile-account-card">
+        <div className="profile-avatar" aria-hidden="true">
+          {usernameInitial}
+        </div>
+        <div className="profile-account-details">
+          <span className="profile-account-label">Signed in as</span>
+          <strong>{user?.username}</strong>
+        </div>
+        <div className="profile-account-meta">
+          <span className="profile-status-pill">
+            <CheckCircle2 size={14} />
+            Active account
+          </span>
         </div>
       </div>
 
-      <div className="profile-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
-        
-        {/* LEFT COLUMN: MANAGE PRIVATE CLAUSE LIBRARY */}
-        <section className="glass-panel" style={{ padding: '2rem' }}>
-          <h2 style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '1.5rem', fontSize: '18px' }}>
-            <Folder size={20} style={{ color: 'var(--accent-color, #007bff)' }} />
-            Manage Private Clause Library
-          </h2>
+      <div className="profile-grid">
+        <section className="profile-panel profile-panel--library">
+          <h3 className="profile-panel-title">
+            <Folder size={20} />
+            Private clause library
+          </h3>
+          <p className="profile-panel-desc">
+            Documents you chose to retain during contract review are indexed here for semantic search.
+          </p>
 
           {loadingStatus ? (
-            <div style={{ display: 'flex', justifyContent: 'center', padding: '3rem' }}>
+            <div className="profile-loading">
               <Loader2 className="spin-icon" size={32} />
+              <span>Loading library…</span>
+            </div>
+          ) : libraryError ? (
+            <div className="profile-empty-state">
+              <AlertCircle size={28} />
+              <p>{libraryError}</p>
+              <button type="button" className="secondary-button" onClick={fetchLibraryStatus}>
+                <RefreshCw size={16} />
+                Retry
+              </button>
             </div>
           ) : (
-            <>
-              {/* STATUS MATRIX METRICS BAR COUNTS */}
-              <div className="metrics-summary" style={{ display: 'flex', gap: '1.5rem', marginBottom: '2rem' }}>
-                <div className="metric-box" style={{ flex: 1, padding: '1rem', background: 'rgba(0,0,0,0.02)', borderRadius: '6px', textAlign: 'center' }}>
-                  <strong style={{ fontSize: '24px', display: 'block' }}>{libraryStatus?.document_count || 0}</strong>
-                  <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Documents</span>
+            <div className="profile-panel-body">
+              <div className="metrics-summary">
+                <div className="metric-box">
+                  <strong>{libraryStatus?.document_count || 0}</strong>
+                  <span>Documents</span>
                 </div>
-                <div className="metric-box" style={{ flex: 1, padding: '1rem', background: 'rgba(0,0,0,0.02)', borderRadius: '6px', textAlign: 'center' }}>
-                  <strong style={{ fontSize: '24px', display: 'block' }}>{libraryStatus?.clause_count || 0}</strong>
-                  <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Clauses</span>
+                <div className="metric-box">
+                  <strong>{libraryStatus?.clause_count || 0}</strong>
+                  <span>Clauses</span>
                 </div>
               </div>
 
-              {/* DOCUMENTS DATA LIST GENERATOR */}
-              <h4 style={{ marginBottom: '1rem', fontSize: '14px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Uploaded Documents Registry</h4>
-              
-              {!libraryStatus?.documents || libraryStatus.documents.length === 0 ? (
-                <div className="empty-state" style={{ padding: '2rem', textAlign: 'center', border: '1px dashed #ccc', borderRadius: '6px' }}>
-                  <FileText size={32} style={{ color: '#ccc', marginBottom: '0.5rem' }} />
-                  <p style={{ margin: 0, color: 'var(--text-secondary)' }}>No documents have been added yet.</p>
+              <h4 className="profile-subheading">Saved documents</h4>
+
+              {!libraryStatus?.documents?.length ? (
+                <div className="profile-empty-state">
+                  <FileText size={32} />
+                  <p>No documents in your library yet.</p>
+                  <span>Enable &quot;Retain in library&quot; when reviewing a contract to add one.</span>
                 </div>
               ) : (
-                <div className="document-rows-container" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', maxHeight: '350px', overflowY: 'auto' }}>
+                <div className="document-rows-container">
                   {libraryStatus.documents.map((doc) => (
-                    <div key={doc.document_hash} className="doc-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem 1rem', background: 'rgba(255,255,255,0.4)', border: '1px solid #eee', borderRadius: '6px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', overflow: 'hidden' }}>
-                        <FileText size={16} style={{ flexShrink: 0, color: 'var(--text-secondary)' }} />
-                        <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '14px' }} title={doc.source}>
+                    <div key={doc.document_hash} className="doc-row">
+                      <div className="doc-row-content">
+                        <FileText size={16} className="doc-row-icon" />
+                        <span className="doc-row-name" title={doc.source}>
                           {doc.source}
                         </span>
                       </div>
-                      <button 
-                        type="button" 
+                      <button
+                        type="button"
+                        className="doc-delete-btn"
                         onClick={() => handleDeleteDocument(doc.document_hash)}
-                        style={{ background: 'none', border: 'none', color: 'var(--risk-high, #dc3545)', cursor: 'pointer', padding: '4px' }}
-                        title="Delete document database chunks"
+                        title="Remove from library"
                       >
                         <Trash2 size={16} />
                       </button>
@@ -136,63 +179,75 @@ export default function ProfileSection() {
                   ))}
                 </div>
               )}
-            </>
+            </div>
           )}
         </section>
 
-        {/* RIGHT COLUMN: SECURITY & PASSWORD PANEL */}
-        <section className="glass-panel" style={{ padding: '2rem' }}>
-          <h2 style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '1.5rem', fontSize: '18px' }}>
-            <Shield size={20} style={{ color: 'var(--accent-color, #007bff)' }} />
-            Security & Authentication
-          </h2>
+        <section className="profile-panel profile-panel--security">
+          <h3 className="profile-panel-title">
+            <Shield size={20} />
+            Security
+          </h3>
+          <p className="profile-panel-desc">
+            Update your password to keep your account and private document library secure.
+          </p>
 
-          <form onSubmit={handlePasswordChange}>
+          <form className="profile-security-form" onSubmit={handlePasswordChange}>
             {passError && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--risk-high, #dc3545)', background: 'rgba(220,53,69,0.05)', padding: '0.75rem', borderRadius: '4px', marginBottom: '1rem', fontSize: '14px' }}>
-                <AlertCircle size={16} /> <span>{passError}</span>
+              <div className="auth-alert error">
+                <AlertCircle size={18} />
+                <span>{passError}</span>
               </div>
             )}
             {passSuccess && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'green', background: 'rgba(0,128,0,0.05)', padding: '0.75rem', borderRadius: '4px', marginBottom: '1rem', fontSize: '14px' }}>
-                <CheckCircle2 size={16} /> <span>{passSuccess}</span>
+              <div className="auth-alert success">
+                <CheckCircle2 size={18} />
+                <span>{passSuccess}</span>
               </div>
             )}
 
-            <div style={{ marginBottom: '1.25rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '14px' }}>Current Password</label>
-              <input 
-                type="password"
-                value={oldPassword}
-                onChange={(e) => setOldPassword(e.target.value)}
-                required
-                style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px', boxSizing: 'border-box' }}
-              />
+            <div className="form-group">
+              <label htmlFor="current-password">Current password</label>
+              <div className="input-wrapper">
+                <Lock size={18} className="input-icon" />
+                <input
+                  id="current-password"
+                  type="password"
+                  value={oldPassword}
+                  onChange={(e) => setOldPassword(e.target.value)}
+                  required
+                  placeholder="Enter current password"
+                  autoComplete="current-password"
+                />
+              </div>
             </div>
 
-            <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '14px' }}>New Password</label>
-              <input 
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                required
-                style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px', boxSizing: 'border-box' }}
-              />
+            <div className="form-group">
+              <label htmlFor="new-password">New password</label>
+              <div className="input-wrapper">
+                <Key size={18} className="input-icon" />
+                <input
+                  id="new-password"
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  required
+                  placeholder="Enter new password"
+                  autoComplete="new-password"
+                />
+              </div>
             </div>
 
-            <button 
-              type="submit" 
-              disabled={passLoading}
-              className="btn-primary"
-              style={{ width: '100%', padding: '12px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', background: '#007bff', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-            >
-              {passLoading ? <Loader2 className="spin-icon" size={16} /> : <Key size={16} />}
-              Update Account Password
+            <button type="submit" className="primary-button" disabled={passLoading}>
+              {passLoading ? (
+                <Loader2 size={18} className="spin-icon" />
+              ) : (
+                <Key size={18} />
+              )}
+              Update password
             </button>
           </form>
         </section>
-
       </div>
     </div>
   );

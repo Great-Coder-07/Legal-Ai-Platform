@@ -56,7 +56,7 @@ function AppContent() {
   };
 
   return (
-    <div className={`app-container${isLandingState ? ' landing-mode' : ''}`}>
+    <div className={`app-container${isLandingState ? ' landing-mode' : ''}${currentView === 'profile' ? ' app-container--profile' : ''}`}>
       {/* GLOBAL APPMENU HEADER BAR */}
       <header className="app-main-header">
         <div className="brand-lockup" onClick={() => setCurrentView('review')} style={{ cursor: 'pointer' }}>
@@ -109,7 +109,7 @@ function AppContent() {
         </nav>
       </header>
 
-      <main>
+      <main className={currentView === 'profile' ? 'main--profile' : undefined}>
         {/* 🟢 VIEW ROUTER BLOCK GENERATOR PANEL */}
         {currentView === 'profile' ? (
           <ProfileSection />

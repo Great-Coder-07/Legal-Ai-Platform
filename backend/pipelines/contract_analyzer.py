@@ -137,6 +137,16 @@ def segment_clauses(text: str) -> list:
     text = re.sub(r"(?i)page\s+\d+\s+of\s+\d+", "", text)
     text = re.sub(r"\-\s*\d+\s*\-", "", text)
 
+    # Looks for lines starting with "EXHIBIT A", "SCHEDULE 1", "APPENDIX", etc.
+    exhibit_pattern = re.search(
+        r'\n(?=(?:EXHIBIT|SCHEDULE|APPENDIX|ANNEX)\s+[A-Z0-9]{1,3}\b)', 
+        text, 
+        re.IGNORECASE
+    )
+    if exhibit_pattern:
+        # Chop off the text exactly where the Exhibit starts
+        text = text[:exhibit_pattern.start()]
+
     split_pattern = re.compile(
         r"\n\s*(?="
         r"(?:\d+[\.\)]\d*[\.\)]?\s)"
@@ -203,7 +213,30 @@ def segment_clauses(text: str) -> list:
     if not cleaned and len(text.strip()) >= 220:
         cleaned = [p.strip() for p in re.split(r"\n{2,}", text) if len(p.strip()) >= 40][:40]
 
-    return cleaned
+    # The Max Size Safety Net
+    MAX_CHARS = 2000 # Roughly 400-500 tokens (Safe for embedding models)
+    safe_chunks = []
+    
+    for chunk in cleaned:
+        if len(chunk) <= MAX_CHARS:
+            safe_chunks.append(chunk)
+        else:
+            # If a chunk is massive, split it by single newlines first
+            sub_chunks = chunk.split('\n')
+            current_piece = ""
+            
+            for sub in sub_chunks:
+                # If adding the next line exceeds the limit, save the piece and start a new one
+                if len(current_piece) + len(sub) > MAX_CHARS and current_piece:
+                    safe_chunks.append(current_piece.strip())
+                    current_piece = sub + "\n"
+                else:
+                    current_piece += sub + "\n"
+            
+            if current_piece.strip():
+                safe_chunks.append(current_piece.strip())
+
+    return safe_chunks
 
 
 def classify_clause(clause: str):
